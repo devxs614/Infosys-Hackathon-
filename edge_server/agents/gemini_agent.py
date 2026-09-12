@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from pydantic import ValidationError
@@ -20,10 +21,11 @@ class GeminiAgent(BaseAgent):
 
     agent_name = "gemini"
 
-    def __init__(self, api_key: str = "", model: str = "", enabled: bool = True, client: Any | None = None) -> None:
+    def __init__(self, api_key: str = "", model: str = "auto", enabled: bool = True, client: Any | None = None) -> None:
         self.api_key = api_key
-        self.model = model
-        self.enabled = enabled and bool(api_key and model)
+        self.model = model.strip() or "auto"
+        self._resolved_model: str | None = None
+        self.enabled = enabled and bool(api_key)
         self.client = client
         if self.enabled and self.client is None:
             try:
@@ -51,13 +53,49 @@ class GeminiAgent(BaseAgent):
             payload = json.loads(cleaned)
         return Decision.model_validate(payload)
 
-    async def _ask_gemini(self, context: str) -> Decision:
+    async def _resolve_model(self) -> str:
+        """Use an explicitly configured model or discover a current text model safely.
+
+        `auto` avoids hardcoding a version that may disappear before the hackathon. Discovery
+        happens only after a real API key has been configured and failures retain the local fallback.
+        """
+        if self.model.lower() != "auto":
+            return self.model
+        if self._resolved_model:
+            return self._resolved_model
         if self.client is None:
             raise RuntimeError("Gemini client unavailable")
 
+        def find_model() -> str:
+            candidates: list[str] = []
+            for item in self.client.models.list():
+                name = str(getattr(item, "name", "")).removeprefix("models/")
+                actions = [str(action).lower() for action in (getattr(item, "supported_actions", None) or [])]
+                unsuitable = ("image", "audio", "tts", "live", "robotics", "embedding")
+                if name.startswith("gemini-") and "generatecontent" in actions and not any(term in name.lower() for term in unsuitable):
+                    candidates.append(name)
+            if not candidates:
+                raise RuntimeError("No compatible Gemini text model is available to this API key")
+            def priority(name: str) -> tuple[bool, tuple[int, ...], str]:
+                """Prefer the highest current Flash generation without naming one explicitly."""
+                version = tuple(int(value) for value in re.findall(r"\d+", name))
+                return "flash" in name.lower(), version, name.lower()
+
+            # Prefer a fast, edge-demo-suitable model and then the newest generation returned by Google.
+            return max(candidates, key=priority)
+
+        self._resolved_model = await asyncio.to_thread(find_model)
+        logger.info("Gemini model discovered successfully")
+        return self._resolved_model
+
+    async def _ask_gemini(self, context: str) -> Decision:
+        if self.client is None:
+            raise RuntimeError("Gemini client unavailable")
+        model = await self._resolve_model()
+
         def generate() -> Any:
             return self.client.models.generate_content(
-                model=self.model,
+                model=model,
                 contents=f"{SYSTEM_PROMPT}\n\nWORLD_STATE_JSON:\n{context}",
                 config={"response_mime_type": "application/json"},
             )
@@ -115,6 +153,6 @@ class GeminiAgent(BaseAgent):
         if self.enabled:
             try:
                 return await self._ask_gemini(self._context(driver, orders, traffic, weather, simulation_minute, time_remaining))
-            except (RuntimeError, OSError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+            except Exception as exc:
                 logger.warning("Gemini unavailable or invalid, using fallback agent: %s", exc.__class__.__name__)
         return self.fallback_decide(driver, orders, traffic, weather, simulation_minute, time_remaining)

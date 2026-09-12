@@ -12,6 +12,7 @@ class TigerDB:
         self.dsn = dsn
         self.enabled = enabled and bool(dsn)
         self.pool: Any | None = None
+        self.last_error: str | None = None
 
     async def connect(self) -> bool:
         if not self.enabled:
@@ -19,10 +20,13 @@ class TigerDB:
         try:
             import asyncpg
             self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=2, command_timeout=2)
+            self.last_error = None
+            logger.info("Tiger telemetry database connected")
             return True
         except Exception as exc:
             logger.warning("Tiger unavailable, using in-memory telemetry: %s", exc.__class__.__name__)
             self.pool = None
+            self.last_error = exc.__class__.__name__
             return False
 
     async def insert_telemetry(self, values: dict[str, Any]) -> bool:
@@ -40,10 +44,10 @@ class TigerDB:
             return True
         except Exception as exc:
             logger.warning("Tiger write failed, retaining memory telemetry: %s", exc.__class__.__name__)
+            self.last_error = exc.__class__.__name__
             return False
 
     async def close(self) -> None:
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
-

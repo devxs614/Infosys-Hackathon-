@@ -19,7 +19,7 @@ ScenarioStream → BaselineWorld → BaselineAgent
                                  RoutingEngine → Simulation → WebSocket → Dashboard
 ```
 
-The edge service runs at `0.0.0.0:8765`; laptop browsers use `ws://RASPBERRY_IP:8765/ws`. See [the architecture notes](docs/architecture.md) for the component boundaries.
+The edge service runs at `0.0.0.0:8000`; the configured dashboard uses `ws://10.71.42.73:8000/ws`. See [the architecture notes](docs/architecture.md) for the component boundaries.
 
 ## Repository layout
 
@@ -36,7 +36,7 @@ The edge service runs at `0.0.0.0:8765`; laptop browsers use `ws://RASPBERRY_IP:
 
 - Python **3.11+** (on Raspberry Pi or local development laptop)
 - Node.js **20+** and npm (dashboard laptop)
-- A phone hotspot or LAN only for a multi-device demo
+- A route from the laptop to the configured Raspberry Pi IP (`10.71.42.73`) for a multi-device demo
 
 Gemini, OSRM and Tiger Data are optional. The application starts without credentials and falls back respectively to a strategic deterministic policy, local Haversine routing, and in-memory telemetry.
 
@@ -55,7 +55,7 @@ cp .env.example .env                   # Windows PowerShell: Copy-Item .env.exam
 Start the backend in terminal 1:
 
 ```bash
-uvicorn edge_server.main:app --host 0.0.0.0 --port 8765
+uvicorn edge_server.main:app --host 0.0.0.0 --port 8000
 ```
 
 Start the dashboard in terminal 2:
@@ -67,7 +67,7 @@ npm install
 npm run dev
 ```
 
-For a same-laptop run, leave `VITE_WS_HOST` blank; the dashboard dynamically uses the browser hostname. Browse to `http://localhost:5173`, press **Start demo**, and use the event buttons.
+The configured deployment binds Vite to `192.168.56.1:5173` and connects it to the Raspberry at `10.71.42.73:8000`. Browse to `http://192.168.56.1:5173`, press **Start demo**, and use the event buttons.
 
 ## Raspberry Pi setup and launch
 
@@ -84,10 +84,19 @@ source .venv/bin/activate
 Equivalent direct command:
 
 ```bash
-uvicorn edge_server.main:app --host 0.0.0.0 --port 8765
+uvicorn edge_server.main:app --host 0.0.0.0 --port 8000
 ```
 
-`scripts/health_check.sh` verifies `http://127.0.0.1:8765/health`. `scripts/run_demo.sh` starts the service and requests the demo endpoint.
+`scripts/health_check.sh` verifies `http://127.0.0.1:8000/health`. `scripts/run_demo.sh` starts the service and requests the demo endpoint.
+
+On the Raspberry Pi, after PostgreSQL and the `courier_edge_db` database are running, initialize the telemetry schema once:
+
+```bash
+sudo apt install postgresql-client
+./scripts/initialize_database.sh
+```
+
+Git does not carry `.env`. Transfer the already-configured ignored `.env` to the Raspberry through your approved secure channel before starting the service; do not add it to a commit.
 
 ## Connect laptop dashboard to the Raspberry Pi
 
@@ -100,17 +109,18 @@ hostname -I
 Copy the reported LAN IP into `dashboard_client/.env`:
 
 ```dotenv
-VITE_WS_HOST=192.168.43.125
-VITE_WS_PORT=8765
+VITE_WS_HOST=10.71.42.73
+VITE_WS_PORT=8000
+VITE_DASHBOARD_HOST=192.168.56.1
 ```
 
 Restart `npm run dev`. From the laptop, verify:
 
 ```bash
-curl http://RASPBERRY_IP:8765/health
+curl http://10.71.42.73:8000/health
 ```
 
-The dashboard uses `ws://RASPBERRY_IP:8765/ws`; it does not hardcode `localhost`. Inspect the browser's Network → WS panel to test the WebSocket. After the connection message, it receives `hello_response`; after **Start demo**, it receives `simulation_state`, `decision`, `metrics`, and event messages.
+The dashboard uses `ws://10.71.42.73:8000/ws`; it does not hardcode `localhost`. Inspect the browser's Network → WS panel to test the WebSocket. After the connection message, it receives `hello_response`; after **Start demo**, it receives `simulation_state`, `decision`, `metrics`, and event messages.
 
 ## Configuration and secrets
 
@@ -118,7 +128,7 @@ Copy `.env.example` to `.env`. Important safe defaults are:
 
 ```dotenv
 HOST=0.0.0.0
-PORT=8765
+PORT=8000
 SHIFT_MINUTES=240
 DEMO_SECONDS=180
 TICK_MS=500
@@ -128,7 +138,7 @@ USE_GEMINI=true
 SCENARIO_SEED=42
 ```
 
-Set `GEMINI_API_KEY`, `GEMINI_MODEL`, or `TIGER_DB_URL` only in your local `.env`; these values are ignored by Git and never sent to the frontend. If `GEMINI_MODEL` is blank, no model name is assumed—the offline strategy runs instead. The current `google-genai` SDK is used only when both key and configured model exist.
+Set `GEMINI_API_KEY` and `TIGER_DB_URL` only in your local `.env`; these values are ignored by Git and never sent to the frontend. Set `GEMINI_MODEL=auto` to discover a compatible, currently available Gemini text model at runtime rather than pinning an aging version. If the API is unavailable, the deterministic strategic fallback runs instead.
 
 ## Run tests
 
@@ -183,9 +193,8 @@ The scaffold is ready for real restaurant datasets, calibrated delivery economic
 
 ## Troubleshooting
 
-- **Dashboard is disconnected:** verify the laptop and Pi are on the same hotspot, `curl http://RASPBERRY_IP:8765/health` works, and restart Vite after changing `dashboard_client/.env`.
+- **Dashboard is disconnected:** verify that the laptop can reach the Pi and `curl http://10.71.42.73:8000/health` works, then restart Vite after changing `dashboard_client/.env`.
 - **No Gemini/Tiger/OSRM access:** expected in offline mode. Check `/health`; the fallback flags should be true and the simulation should still run.
 - **Port already in use:** change `PORT` and the frontend `VITE_WS_PORT` together.
 - **Map tiles blank:** Internet may be unavailable. The Leaflet map can be empty while controls, metrics and local WebSocket continue working.
 - **Python package error:** activate the project venv and rerun `python -m pip install -r requirements.txt`.
-

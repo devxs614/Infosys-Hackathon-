@@ -29,9 +29,9 @@ def _float(name: str, default: float) -> float:
 class Settings:
     app_env: str = "development"
     host: str = "0.0.0.0"
-    port: int = 8765
+    port: int = 8000
     gemini_api_key: str = ""
-    gemini_model: str = ""
+    gemini_model: str = "auto"
     tiger_db_url: str = ""
     osrm_url: str = "https://router.project-osrm.org"
     shift_minutes: int = 240
@@ -50,8 +50,8 @@ def get_settings() -> Settings:
     load_dotenv()
     return Settings(
         app_env=os.getenv("APP_ENV", "development"), host=os.getenv("HOST", "0.0.0.0"),
-        port=_int("PORT", 8765), gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-        gemini_model=os.getenv("GEMINI_MODEL", ""), tiger_db_url=os.getenv("TIGER_DB_URL", ""),
+        port=_int("PORT", 8000), gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+        gemini_model=os.getenv("GEMINI_MODEL", "auto").strip() or "auto", tiger_db_url=os.getenv("TIGER_DB_URL", ""),
         osrm_url=os.getenv("OSRM_URL", "https://router.project-osrm.org").rstrip("/"),
         shift_minutes=_int("SHIFT_MINUTES", 240), demo_seconds=_int("DEMO_SECONDS", 180),
         tick_ms=_int("TICK_MS", 500), use_osrm=_bool("USE_OSRM", True),
@@ -59,4 +59,3 @@ def get_settings() -> Settings:
         monterrey_lat=_float("MONTERREY_LAT", 25.6866), monterrey_lon=_float("MONTERREY_LON", -100.3161),
         scenario_seed=_int("SCENARIO_SEED", 42),
     )
-
