@@ -2,6 +2,20 @@
 
 **Infosys HackMTY 2026 — Challenge 3: The Courier**
 
+## Rumbo interface
+
+The dashboard is now branded **Rumbo | Edge Logistics OS**. Its single React application exposes four shareable routes backed by the same Raspberry Pi WebSocket:
+
+| Route | Demo account | Purpose |
+| --- | --- | --- |
+| `/` | Role selector | Glassmorphic Rumbo landing with the four demo roles. |
+| `/app/client?id=1` | `cliente1` / `123` | San Pedro client menu, 3D products and order tracking. |
+| `/app/client?id=2` | `cliente2` / `123` | Tec / Valle client menu, 3D products and order tracking. |
+| `/app/driver` | `driver1` / `123` | Courier HUD, Edge batch alert and delivery controls. |
+| `/app/dashboard` | `admin` / `123` | Apple-style bento Command Center and judge controls. |
+
+The client menu uses React Three Fiber/Drei; page and modal transitions use Framer Motion; the UI uses Tailwind CSS, Lucide icons, and a dark vector map that continues to render without map tiles. See the Rumbo WebSocket protocol in [docs/api-contract.md](docs/api-contract.md#rumbo-live-order-messages).
+
 Courier Edge Decision System is a resilient edge simulation for comparing a reasonable reactive courier against a strategic AI/Gemini courier. It converts a four-hour shift into a three-minute reproducible demo, measures MXN per simulated hour, earnings, distance and late deliveries, and shows the comparison on a laptop dashboard.
 
 It does not fabricate an AI advantage. One seeded `ScenarioStream` produces each order, timestamp, traffic condition, weather condition, surge, and disruption exactly once. Those inputs are copied to independent `BaselineWorld` and `GeminiWorld` instances; only decisions diverge.

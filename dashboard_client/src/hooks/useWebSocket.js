@@ -8,6 +8,10 @@ export function useWebSocket(onMessage) {
     socketRef.current = createSimulationSocket(onMessage, setStatus)
     return () => socketRef.current?.close()
   }, [onMessage])
-  return { status }
+  const send = (message) => {
+    if (socketRef.current?.readyState !== WebSocket.OPEN) return false
+    socketRef.current.send(JSON.stringify(message))
+    return true
+  }
+  return { status, send }
 }
-

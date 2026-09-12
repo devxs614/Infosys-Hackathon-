@@ -1,9 +1,15 @@
 """WebSocket endpoint for local dashboard updates."""
 from __future__ import annotations
 
+from pydantic import ValidationError
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter()
+
+
+def _validation_details(error: ValidationError) -> list[dict[str, object]]:
+    """Pydantic may retain a Python exception in `ctx`; WebSocket frames must stay JSON-safe."""
+    return [{"loc": list(item["loc"]), "message": item["msg"], "type": item["type"]} for item in error.errors()]
 
 
 @router.websocket("/ws")
@@ -13,10 +19,36 @@ async def simulation_websocket(websocket: WebSocket) -> None:
     try:
         await manager.send(websocket, "connection", {"status": "connected", "transport": "websocket"})
         await manager.send(websocket, "hello_response", {"service": "Courier Edge Decision System", "state": websocket.app.state.engine.state().model_dump(mode="json")})
+        await manager.send(websocket, "live_order_state", websocket.app.state.live_orders.snapshot())
         while True:
             message = await websocket.receive_json()
-            if message.get("type") == "ping":
+            message_type = message.get("type")
+            payload = message.get("data", message)
+            if message_type == "ping":
                 await manager.send(websocket, "pong", {})
+            elif message_type == "NEW_ORDER":
+                try:
+                    order, batch = await websocket.app.state.live_orders.create_order(payload)
+                    await manager.broadcast("NEW_ORDER", {"order": order.model_dump(mode="json")})
+                    if batch:
+                        batch_data = batch.model_dump(mode="json")
+                        await manager.broadcast("AI_BATCH_SUGGESTION", batch_data)
+                        await manager.broadcast("DRIVER_NOTIFICATION", {
+                            "title": "Rumbo AI detectó un batch",
+                            "batch": batch_data,
+                        })
+                except ValidationError as exc:
+                    await manager.send(websocket, "error", {"message": "Invalid NEW_ORDER", "details": _validation_details(exc)})
+            elif message_type == "DRIVER_ACTION":
+                try:
+                    batch = await websocket.app.state.live_orders.apply_driver_action(payload)
+                    if batch:
+                        await manager.broadcast("DRIVER_ACTION", {"action": payload.get("action"), "batch": batch.model_dump(mode="json"),
+                                                                   "orders": websocket.app.state.live_orders.snapshot()["orders"]})
+                    else:
+                        await manager.send(websocket, "error", {"message": "No live batch is available"})
+                except ValidationError as exc:
+                    await manager.send(websocket, "error", {"message": "Invalid DRIVER_ACTION", "details": _validation_details(exc)})
     except WebSocketDisconnect:
         pass
     finally:

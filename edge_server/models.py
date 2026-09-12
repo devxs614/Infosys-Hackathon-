@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -34,6 +34,7 @@ class EventType(str, Enum):
     TORRENTIAL_RAIN = "TORRENTIAL_RAIN"
     GONZALITOS_FLOOD = "GONZALITOS_FLOOD"
     SAN_PEDRO_SURGE = "SAN_PEDRO_SURGE"
+    SAN_PEDRO_CONGESTION = "SAN_PEDRO_CONGESTION"
     ROAD_CLOSURE = "ROAD_CLOSURE"
 
 
@@ -182,3 +183,44 @@ class SocketMessage(BaseModel):
     timestamp: int
     data: dict[str, Any]
 
+
+class LiveOrderRequest(BaseModel):
+    """Client-originated order contract accepted by the central WebSocket."""
+
+    client_id: Literal["client_1", "client_2"]
+    location: list[float] = Field(min_length=2, max_length=2)
+    items: list[dict[str, Any]] = Field(min_length=1)
+
+    @field_validator("location")
+    @classmethod
+    def monterrey_coordinates(cls, value: list[float]) -> list[float]:
+        lat, lon = value
+        if not 25.4 <= lat <= 26.0 or not -100.7 <= lon <= -99.9:
+            raise ValueError("location must be inside the Monterrey metropolitan demo area")
+        return value
+
+
+class DriverActionRequest(BaseModel):
+    action: Literal["ACCEPT_BATCH", "ARRIVED_RESTAURANT", "DELIVERED_CLIENT_1", "DELIVERED_CLIENT_2"]
+
+
+class LiveOrder(BaseModel):
+    id: str
+    client_id: Literal["client_1", "client_2"]
+    location: list[float]
+    items: list[dict[str, Any]]
+    status: str = "REQUESTED"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BatchPlan(BaseModel):
+    id: str
+    order_ids: list[str]
+    client_ids: list[str]
+    pickup: list[float]
+    route: list[list[float]]
+    individual_distance_km: float = Field(ge=0)
+    batch_distance_km: float = Field(ge=0)
+    savings_percent: float = Field(ge=0, le=100)
+    reasoning: str
+    status: str = "SUGGESTED"

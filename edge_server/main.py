@@ -11,6 +11,7 @@ from edge_server.config import get_settings
 from edge_server.data.telemetry_service import TelemetryService
 from edge_server.data.tiger_db import TigerDB
 from edge_server.logging_config import configure_logging
+from edge_server.live_order_service import LiveOrderCoordinator
 from edge_server.simulation.simulation_engine import SimulationEngine
 from edge_server.websocket_manager import ConnectionManager
 
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
         telemetry = TelemetryService(TigerDB(settings.tiger_db_url, settings.use_tiger))
         await telemetry.start()
         app.state.engine = SimulationEngine(settings, telemetry, app.state.connections.broadcast)
+        app.state.live_orders = LiveOrderCoordinator(app.state.engine.gemini_agent)
         yield
         await app.state.engine.stop()
         await telemetry.close()

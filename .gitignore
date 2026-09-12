@@ -6,7 +6,9 @@ __pycache__/
 .coverage
 htmlcov/
 node_modules/
+node_modules.pre-rumbo/
+.pnpm-store/
+package-lock.json
 dist/
 *.log
 .DS_Store
-

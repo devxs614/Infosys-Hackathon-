@@ -217,7 +217,7 @@ class SimulationEngine:
         return event
 
     async def trigger(self, judge_event: JudgeEvent) -> None:
-        zone = judge_event.zone or {EventType.GONZALITOS_FLOOD: "Gonzalitos", EventType.SAN_PEDRO_SURGE: "San Pedro",
+        zone = judge_event.zone or {EventType.GONZALITOS_FLOOD: "Gonzalitos", EventType.SAN_PEDRO_SURGE: "San Pedro", EventType.SAN_PEDRO_CONGESTION: "San Pedro",
                                     EventType.ROAD_CLOSURE: "Obispado"}.get(judge_event.event_type, "Monterrey")
         event = Disruption(id=f"MANUAL-{judge_event.event_type.value}", event_type=judge_event.event_type, zone=zone,
                            start_minute=self.clock.current_minute, active=judge_event.active, description=f"Judge triggered {judge_event.event_type.value}")

@@ -1,26 +1,25 @@
-import ConnectionStatus from './components/ConnectionStatus'
-import DecisionPanel from './components/DecisionPanel'
-import DisruptionPanel from './components/DisruptionPanel'
-import DriverComparison from './components/DriverComparison'
-import EventLog from './components/EventLog'
-import LiveMap from './components/LiveMap'
-import MetricsPanel from './components/MetricsPanel'
-import OrderList from './components/OrderList'
-import SimulationControls from './components/SimulationControls'
-import TrafficPanel from './components/TrafficPanel'
-import WeatherPanel from './components/WeatherPanel'
-import { useSimulation } from './hooks/useSimulation'
+import { AnimatePresence, motion } from 'framer-motion'
 import { useWebSocket } from './hooks/useWebSocket'
+import { ClientExperience } from './rumbo/ClientExperience'
+import { CommandCenter } from './rumbo/CommandCenter'
+import { DriverHUD } from './rumbo/DriverHUD'
+import { Landing } from './rumbo/Landing'
+import { useRumboLive } from './rumbo/useRumboLive'
+import { useRumboRoute } from './rumbo/useRumboRoute'
+
+function RouteScene({ path, query, navigate, liveState, socket }) {
+  const onHome = () => navigate('/')
+  const connected = socket.status === 'connected'
+  if (path === '/app/client') return <ClientExperience clientNumber={query.get('id')} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} />
+  if (path === '/app/driver') return <DriverHUD live={liveState.live} notification={liveState.notification} onDismiss={liveState.dismissNotification} connected={connected} send={socket.send} onHome={onHome} />
+  if (path === '/app/dashboard') return <CommandCenter live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} />
+  return <Landing onNavigate={navigate} />
+}
 
 export default function App() {
-  const simulation = useSimulation()
-  const { status } = useWebSocket(simulation.onMessage)
-  const { state } = simulation
-  return <main className="app-shell"><header><div><p className="eyebrow">INFOSYS HACKMTY 2026 · THE COURIER</p><h1>Courier Edge Decision System</h1><p className="subtitle">Fair, local comparison of a reactive driver and a strategic AI driver.</p></div><ConnectionStatus status={status} /></header>
-    <div className="shift-bar"><span>Scenario seed {state?.scenario_seed ?? '42'}</span><span>Simulation minute {Math.round(state?.simulation_minute || 0)} / {state?.shift_minutes || 240}</span><span className={state?.running ? 'running' : ''}>{state?.running ? '● Demo running' : '● Demo idle'}</span></div>
-    <MetricsPanel metrics={state?.metrics} />
-    <section className="workspace"><LiveMap state={state} /><aside className="side-stack"><DecisionPanel decision={state?.last_decisions?.gemini} /><SimulationControls running={state?.running} onStart={simulation.start} onStop={simulation.stop} onReset={simulation.reset} onTrigger={simulation.trigger} /></aside></section>
-    <section className="lower-grid"><DriverComparison comparison={state?.metrics?.comparison} /><WeatherPanel weather={state?.weather} /><TrafficPanel traffic={state?.traffic} /><DisruptionPanel events={state?.events} /></section>
-    <section className="lower-grid orders-grid"><OrderList orders={state?.orders} /><EventLog lastEvent={simulation.lastEvent} error={simulation.error} /></section>
-  </main>
+  const route = useRumboRoute()
+  const liveState = useRumboLive()
+  const socket = useWebSocket(liveState.onMessage)
+  const routeKey = `${route.path}:${route.query.get('id') || ''}`
+  return <AnimatePresence mode="wait"><motion.div key={routeKey} initial={{ opacity: 0, filter: 'blur(7px)' }} animate={{ opacity: 1, filter: 'blur(0px)' }} exit={{ opacity: 0, filter: 'blur(7px)' }} transition={{ duration: .3 }}><RouteScene {...route} liveState={liveState} socket={socket} /></motion.div></AnimatePresence>
 }

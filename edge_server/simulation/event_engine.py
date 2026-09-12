@@ -33,6 +33,10 @@ class EventEngine:
                 traffic.flooded_roads.append("Gonzalitos")
                 traffic.affected_zones.append("Gonzalitos")
                 traffic.congestion_level = "severe"
+            elif event.event_type == EventType.SAN_PEDRO_CONGESTION:
+                traffic.global_factor = max(traffic.global_factor, 1.55)
+                traffic.affected_zones.append("San Pedro")
+                traffic.congestion_level = "heavy"
             elif event.event_type == EventType.ROAD_CLOSURE:
                 traffic.road_closures.append(event.zone)
                 traffic.affected_zones.append(event.zone)
