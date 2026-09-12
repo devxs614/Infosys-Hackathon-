@@ -20,6 +20,7 @@ from edge_server.models import (
     DriverTelemetryRequest,
     LiveOrder,
     LiveOrderRequest,
+    OrderCancellationRequest,
     Order,
     TrafficState,
     UserRegistration,
@@ -67,7 +68,7 @@ class LiveOrderCoordinator:
         self._lock = asyncio.Lock()
 
     def _metrics(self) -> dict:
-        statuses = {status: 0 for status in ("PENDING", "MATCHED", "IN_TRANSIT", "DELIVERED")}
+        statuses = {status: 0 for status in ("PENDING", "MATCHED", "IN_TRANSIT", "DELIVERED", "CANCELLED")}
         for order in self.orders.values():
             statuses[order.status] = statuses.get(order.status, 0) + 1
         return {
@@ -216,10 +217,12 @@ class LiveOrderCoordinator:
                     batch_orders = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders and self.orders[order_id].status == "PENDING"]
                     if batch_orders:
                         self._assign_driver(batch_orders, batch)
+                        await self._attach_courier_route(batch_orders)
                         matched_order_ids.extend(order.id for order in batch_orders if order.driver_id)
                 for order in self.orders.values():
                     if order.status == "PENDING" and not order.driver_id:
                         self._assign_driver([order])
+                        await self._attach_courier_route([order])
                         if order.driver_id:
                             matched_order_ids.append(order.id)
             driver = self._public_driver(self.drivers[request.id]) if request.id in self.drivers else None
@@ -253,8 +256,10 @@ class LiveOrderCoordinator:
                 self.batches[batch.id] = batch
                 self.batch = batch
                 self._assign_driver([partner, order], batch)
+                await self._attach_courier_route([partner, order])
                 return order, batch
             self._assign_driver([order])
+            await self._attach_courier_route([order])
             return order, None
 
     def _find_batch_partner(self, incoming: LiveOrder) -> LiveOrder | None:
@@ -268,21 +273,31 @@ class LiveOrderCoordinator:
             return None
         return min(candidates, key=lambda order: haversine_km(order.destination[0], order.destination[1], incoming.destination[0], incoming.destination[1]))
 
-    def _available_driver(self, origin: list[float]) -> dict | None:
+    def _available_driver(self, origin: list[float], orders: Iterable[LiveOrder] = ()) -> dict | None:
+        order_ids = {order.id for order in orders}
         candidates = [
             driver for driver in self.drivers.values()
-            if driver["online"] and len(driver["assigned_order_ids"]) < 2
+            if driver["online"] and len(driver["assigned_order_ids"]) + len(order_ids - set(driver["assigned_order_ids"])) <= 2
         ]
         if not candidates:
             return None
-        return min(candidates, key=lambda driver: haversine_km(driver["position"][0], driver["position"][1], origin[0], origin[1]))
+        # The closest registered, online courier reaches the restaurant first. A
+        # current assignment is used only as a deterministic tie breaker.
+        return min(candidates, key=lambda driver: (
+            haversine_km(driver["position"][0], driver["position"][1], origin[0], origin[1]),
+            len(driver["assigned_order_ids"]),
+            driver["id"],
+        ))
 
     def _assign_driver(self, orders: list[LiveOrder], batch: BatchPlan | None = None) -> None:
-        driver = self.drivers.get(orders[0].driver_id or "") if batch else None
-        driver = driver or self._available_driver(orders[0].origin)
+        driver = self._available_driver(orders[0].origin, orders)
         if driver is None:
             return
         for order in orders:
+            previous_driver = self.drivers.get(order.driver_id or "")
+            if previous_driver and previous_driver["id"] != driver["id"]:
+                previous_driver["assigned_order_ids"] = [assigned_id for assigned_id in previous_driver["assigned_order_ids"] if assigned_id != order.id]
+                previous_driver["updated_at"] = _utc_now()
             order.status = "MATCHED"
             order.driver_id = driver["id"]
             order.batch_id = batch.id if batch else None
@@ -291,6 +306,21 @@ class LiveOrderCoordinator:
         driver["updated_at"] = _utc_now()
         if batch:
             batch.driver_id = driver["id"]
+
+    async def _attach_courier_route(self, orders: list[LiveOrder]) -> None:
+        """Attach the third, street-level leg: assigned courier to restaurant."""
+        if not orders or not orders[0].driver_id:
+            return
+        driver = self.drivers.get(orders[0].driver_id)
+        if not driver:
+            return
+        estimate = await self.routing.estimate(
+            tuple(driver["position"]), tuple(orders[0].origin), TrafficState(), WeatherState(),
+        )
+        for order in orders:
+            order.courier_route_geometry = estimate.geometry
+            order.courier_distance_km = round(estimate.distance_km, 2)
+            order.courier_eta_minutes = round(estimate.duration_minutes, 1)
 
     async def _build_batch(self, orders: Iterable[LiveOrder]) -> BatchPlan:
         first, second = sorted(orders, key=lambda order: order.distance_km)
@@ -376,16 +406,53 @@ class LiveOrderCoordinator:
         if not driver_id or driver_id not in self.drivers:
             return
         driver = self.drivers[driver_id]
-        driver["assigned_order_ids"] = [order_id for order_id in driver["assigned_order_ids"] if self.orders.get(order_id) and self.orders[order_id].status != "DELIVERED"]
+        driver["assigned_order_ids"] = [
+            order_id for order_id in driver["assigned_order_ids"]
+            if self.orders.get(order_id) and self.orders[order_id].status not in {"DELIVERED", "CANCELLED"}
+        ]
         driver["updated_at"] = _utc_now()
+
+    async def cancel_order(self, payload: dict) -> tuple[LiveOrder, BatchPlan | None]:
+        """Cancel an undelivered order and immediately free it from its courier HUD."""
+        request = OrderCancellationRequest.model_validate(payload)
+        async with self._lock:
+            order = self.orders.get(request.order_id)
+            if not order or order.client_id != request.client_id:
+                raise ValueError("Order was not found for this client")
+            if order.status in {"DELIVERED", "CANCELLED"}:
+                raise ValueError("Only an active order can be cancelled")
+
+            driver_id = order.driver_id
+            batch = self.batches.get(order.batch_id or "")
+            order.status = "CANCELLED"
+            self._release_finished_driver(driver_id)
+
+            if batch:
+                remaining = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders and self.orders[order_id].status != "CANCELLED"]
+                batch.status = "PARTIALLY_CANCELLED" if remaining else "CANCELLED"
+                if remaining:
+                    # A partial batch becomes a normal direct delivery. Its original
+                    # shared geometry must not route the courier through a cancelled stop.
+                    for remaining_order in remaining:
+                        remaining_order.batch_id = None
+                        direct = await self.routing.estimate(
+                            tuple(remaining_order.origin), tuple(remaining_order.destination), TrafficState(), WeatherState(),
+                        )
+                        remaining_order.route_geometry = direct.geometry
+                        remaining_order.street_names = direct.street_names
+                        remaining_order.distance_km = round(direct.distance_km, 2)
+                        remaining_order.eta_minutes = round(direct.duration_minutes, 1)
+                    await self._attach_courier_route(remaining)
+                if self.batch and self.batch.id == batch.id:
+                    self.batch = None
+            return order, batch
 
     async def update_telemetry(self, payload: dict) -> dict:
         request = DriverTelemetryRequest.model_validate(payload)
         async with self._lock:
             driver = self.drivers.get(request.driver_id)
             if not driver:
-                driver = {"id": request.driver_id, "name": request.driver_id, "online": True, "assigned_order_ids": []}
-                self.drivers[request.driver_id] = driver
+                raise ValueError("Register the courier before sending telemetry")
             driver.update({"position": request.position, "bearing": request.bearing, "street_name": request.street_name,
                            "speed_kmh": request.speed_kmh, "online": True, "updated_at": _utc_now()})
             telemetry = {"driver_id": request.driver_id, "position": request.position, "bearing": request.bearing,

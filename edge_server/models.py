@@ -263,6 +263,13 @@ class DriverActionRequest(BaseModel):
     batch_id: str | None = Field(default=None, min_length=3, max_length=100)
 
 
+class OrderCancellationRequest(BaseModel):
+    """A client may cancel only its own undelivered order."""
+
+    client_id: str = Field(min_length=3, max_length=100)
+    order_id: str = Field(min_length=3, max_length=100)
+
+
 class DriverTelemetryRequest(BaseModel):
     driver_id: str = Field(min_length=3, max_length=100)
     position: list[float] = Field(min_length=2, max_length=2)
@@ -295,6 +302,9 @@ class LiveOrder(BaseModel):
     courier_payout_mxn: float = 0
     platform_commission_mxn: float = 0
     route_geometry: list[list[float]] = Field(default_factory=list)
+    courier_route_geometry: list[list[float]] = Field(default_factory=list)
+    courier_distance_km: float = 0
+    courier_eta_minutes: float = 0
     street_names: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 

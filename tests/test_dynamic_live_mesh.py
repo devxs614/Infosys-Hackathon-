@@ -108,3 +108,63 @@ def test_late_driver_registration_matches_pending_order_and_broadcasts_financial
             assert update["financials"]["current_trip_earnings_mxn"] > 0
             verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
             assert verdict["available"] is False
+
+
+def test_dispatch_chooses_the_closest_registered_driver_and_includes_approach_route():
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            _receive_until(socket, "live_order_state")
+            for driver_id, name, location in (
+                ("driver-far", "Elena Lejana", [25.7210, -100.2800]),
+                ("driver-near", "Carlos Cercano", [25.6552, -100.3775]),
+            ):
+                socket.send_json({"type": "REGISTER_USER", "data": {
+                    "id": driver_id, "name": name, "email": f"{driver_id}@example.com", "role": "driver", "location": location,
+                }})
+                _receive_until(socket, "DRIVER_ONLINE")
+
+            socket.send_json({"type": "NEW_ORDER", "data": {
+                "client_id": "client-route", "client_name": "Mariana", "restaurant": "Centrito",
+                "origin": [25.6550, -100.3780], "destination": [25.6488, -100.3574],
+                "destination_label": "Centrito Valle", "items": [{"id": "bowl", "price": 198}],
+            }})
+            order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
+            assert order["driver_id"] == "driver-near"
+            assert order["courier_route_geometry"]
+            assert order["courier_distance_km"] >= 0
+            match = _receive_until(socket, "ORDER_MATCHED")["data"]
+            assert match["driver"]["name"] == "Carlos Cercano"
+
+
+def test_cancelled_order_is_removed_from_the_assigned_courier_hud():
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            _receive_until(socket, "live_order_state")
+            socket.send_json({"type": "REGISTER_USER", "data": {
+                "id": "driver-cancel", "name": "Carlos", "email": "carlos@example.com", "role": "driver", "location": [25.6552, -100.3775],
+            }})
+            _receive_until(socket, "DRIVER_ONLINE")
+            socket.send_json({"type": "NEW_ORDER", "data": {
+                "client_id": "client-cancel", "client_name": "Mariana", "restaurant": "Centrito",
+                "origin": [25.6550, -100.3780], "destination": [25.6488, -100.3574],
+                "destination_label": "Centrito Valle", "items": [{"id": "bowl", "price": 198}],
+            }})
+            order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
+            socket.send_json({"type": "CANCEL_ORDER", "data": {"client_id": "client-cancel", "order_id": order["id"]}})
+            cancelled = _receive_until(socket, "ORDER_CANCELLED")["data"]
+            assert cancelled["order"]["status"] == "CANCELLED"
+            assert cancelled["driver_id"] == "driver-cancel"
+            state = _receive_until(socket, "LIVE_ORDER_STATE")["data"]
+            driver = next(item for item in state["drivers"] if item["id"] == "driver-cancel")
+            assert order["id"] not in driver["assigned_order_ids"]
+
+
+def test_telemetry_cannot_create_an_unregistered_courier():
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            _receive_until(socket, "live_order_state")
+            socket.send_json({"type": "DRIVER_TELEMETRY", "data": {
+                "driver_id": "driver-unknown", "position": [25.65, -100.35], "street_name": "Gonzalitos",
+            }})
+            error = _receive_until(socket, "error")
+            assert "Register the courier" in error["data"]["message"]

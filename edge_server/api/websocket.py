@@ -53,6 +53,12 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                         if match_payload:
                             await manager.broadcast("ORDER_MATCHED", match_payload)
                             await manager.broadcast("DRIVER_FINANCIAL_UPDATE", websocket.app.state.live_orders.driver_financial_update(matched_order.driver_id))
+                            await manager.broadcast("DRIVER_NOTIFICATION", {
+                                "title": "Nuevo pedido asignado",
+                                "driver_id": matched_order.driver_id,
+                                "order": matched_order.model_dump(mode="json"),
+                                "message": f"{matched_order.restaurant} → {matched_order.destination_label}",
+                            })
                     await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())
                     if batch:
                         batch_data = batch.model_dump(mode="json")
@@ -60,11 +66,35 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                         await manager.broadcast("AI_BATCH_OPTIMIZATION", batch_data)
                         await manager.broadcast("DRIVER_NOTIFICATION", {
                             "title": "Rumbo AI detectó un batch",
+                            "driver_id": batch.driver_id,
                             "batch": batch_data,
+                            "message": batch.reasoning,
                         })
                     await manager.broadcast("VERDICT_EVALUATION", websocket.app.state.live_orders.verdict_evaluation())
                 except ValidationError as exc:
                     await manager.send(websocket, "error", {"message": "Invalid NEW_ORDER", "details": _validation_details(exc)})
+            elif message_type == "CANCEL_ORDER":
+                try:
+                    order, batch = await websocket.app.state.live_orders.cancel_order(payload)
+                    await manager.broadcast("ORDER_CANCELLED", {
+                        "order": order.model_dump(mode="json"),
+                        "batch": batch.model_dump(mode="json") if batch else None,
+                        "driver_id": order.driver_id,
+                    })
+                    if order.driver_id:
+                        await manager.broadcast("DRIVER_NOTIFICATION", {
+                            "title": "Pedido cancelado por el cliente",
+                            "driver_id": order.driver_id,
+                            "order": order.model_dump(mode="json"),
+                            "message": f"{order.client_name} canceló el pedido {order.id}.",
+                        })
+                        await manager.broadcast("DRIVER_FINANCIAL_UPDATE", websocket.app.state.live_orders.driver_financial_update(order.driver_id))
+                    await manager.broadcast("VERDICT_EVALUATION", websocket.app.state.live_orders.verdict_evaluation())
+                    await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())
+                except ValidationError as exc:
+                    await manager.send(websocket, "error", {"message": "Invalid CANCEL_ORDER", "details": _validation_details(exc)})
+                except ValueError as exc:
+                    await manager.send(websocket, "error", {"message": str(exc)})
             elif message_type == "DRIVER_ACTION":
                 try:
                     batch, orders = await websocket.app.state.live_orders.apply_driver_action(payload)
@@ -89,6 +119,8 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                     await manager.broadcast("LIVE_METRICS", websocket.app.state.live_orders.snapshot()["metrics"])
                 except ValidationError as exc:
                     await manager.send(websocket, "error", {"message": "Invalid DRIVER_TELEMETRY", "details": _validation_details(exc)})
+                except ValueError as exc:
+                    await manager.send(websocket, "error", {"message": str(exc)})
     except WebSocketDisconnect:
         pass
     finally:

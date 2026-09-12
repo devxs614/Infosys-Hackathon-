@@ -15,7 +15,7 @@ export function ClientAssignmentModal({ assignment }) {
   }, [assignment?.order?.id])
   const driver = assignment?.driver
   if (!driver) return null
-  const eta = Math.max(1, Math.round(assignment.order?.eta_minutes || 0))
+  const eta = Math.max(1, Math.round(assignment.order?.courier_eta_minutes ?? assignment.order?.eta_minutes ?? 0))
   return <AnimatePresence>{visible && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/55 p-5 backdrop-blur-md">
     <motion.section initial={{ opacity: 0, y: 22, scale: .95 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 14, scale: .96 }} transition={{ type: 'spring', stiffness: 260, damping: 22 }} className="relative w-full max-w-md overflow-hidden rounded-[2rem] border border-cyan/40 bg-[#101522]/95 p-7 shadow-2xl">
       <motion.div animate={{ opacity: [.15, .8, .15], scale: [.9, 1.15, .9] }} transition={{ duration: 1.1, repeat: 2 }} className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-cyan/40 blur-3xl" />
