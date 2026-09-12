@@ -1,4 +1,6 @@
 .venv/
+.env
+dashboard_client/.env
 venv/
 __pycache__/
 *.py[cod]

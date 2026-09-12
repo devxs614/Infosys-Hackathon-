@@ -1,17 +1,63 @@
-import { motion } from 'framer-motion'
-import { MapPin, Navigation } from 'lucide-react'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import { useEffect, useMemo, useRef } from 'react'
+import { CircleMarker, MapContainer, Marker, Polyline, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet'
+import { monterreyCenter } from './data'
 
-export function RumboMap({ locations = [], batch, className = '' }) {
-  const route = batch?.route || []
-  return <div className={`relative min-h-64 overflow-hidden rounded-3xl border border-cyan/20 bg-[#0c1420] ${className}`}>
-    <div className="map-grid absolute inset-0 opacity-60" /><div className="scanline absolute inset-x-0 top-0 h-24 opacity-40" />
-    <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Mapa vectorial de Monterrey">
-      <path d="M5 78 C22 53, 29 58, 43 41 S69 18, 95 29" fill="none" stroke="rgba(148,163,184,.34)" strokeWidth=".8" />
-      <path d="M-4 34 C23 28, 40 77, 103 62" fill="none" stroke="rgba(6,182,212,.28)" strokeWidth=".9" />
-      {route.length > 1 && <motion.path initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 1.4 }} d="M26 68 C42 58, 57 44, 75 32 S86 25, 92 23" fill="none" stroke="#06b6d4" strokeWidth="1.6" strokeLinecap="round" />}
-    </svg>
-    <div className="absolute left-[26%] top-[66%] flex -translate-x-1/2 -translate-y-1/2 items-center justify-center"><span className="orbital-ring absolute h-6 w-6 rounded-full" /><span className="relative rounded-full bg-violet p-1.5 shadow-glow"><Navigation size={13} /></span></div>
-    {locations.map((location, index) => <div key={location.id || index} className="absolute" style={{ left: `${66 + index * 18}%`, top: `${42 - index * 16}%` }}><motion.div animate={{ scale: [1, 1.15, 1] }} transition={{ repeat: Infinity, duration: 2.1, delay: index * .3 }} className="rounded-full border border-cyan/60 bg-cyan/20 p-1.5 text-cyan shadow-cyan"><MapPin size={14} /></motion.div><span className="mt-1 block -translate-x-1/3 whitespace-nowrap text-[9px] font-medium text-white/70">{location.name || location.client_id}</span></div>)}
-    <div className="absolute bottom-4 left-4 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-[10px] tracking-[.12em] text-cyan/80 backdrop-blur">MONTERREY · EDGE ROUTE</div>
+const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+const tileAttribution = '&copy; OpenStreetMap contributors &copy; CARTO'
+
+function icon(kind, bearing = 0) {
+  const symbols = { pickup: '●', destination: '⌖', driver: '➤' }
+  return L.divIcon({
+    className: `rumbo-marker rumbo-marker-${kind}`,
+    html: `<span style="transform:rotate(${kind === 'driver' ? bearing : 0}deg)">${symbols[kind] || '●'}</span>`,
+    iconSize: [34, 34], iconAnchor: [17, 17],
+  })
+}
+
+function Bounds({ points }) {
+  const map = useMap()
+  const fitted = useRef(false)
+  useEffect(() => {
+    if (!fitted.current && points.length > 1) {
+      fitted.current = true
+      map.fitBounds(points, { padding: [34, 34], maxZoom: 14, animate: true })
+    }
+  }, [map, points])
+  return null
+}
+
+function ClickToPlace({ onChange }) {
+  useMapEvents({ click: (event) => onChange?.([event.latlng.lat, event.latlng.lng]) })
+  return null
+}
+
+function normalizeRoute(route, routeCoordinates) {
+  if (!route?.length) return []
+  return route.map(([first, second]) => routeCoordinates === 'latlng' ? [first, second] : [second, first])
+}
+
+export function RumboMap({
+  className = '', origin, destination, route = [], routeCoordinates = 'lonlat', driver, orders = [],
+  interactive = false, onDestinationChange, showBounds = true,
+}) {
+  const originPoint = origin?.coords || origin
+  const destinationPoint = destination?.coords || destination
+  const line = useMemo(() => normalizeRoute(route, routeCoordinates), [route, routeCoordinates])
+  const orderPoints = orders.map((order) => order.destination || order.location).filter(Boolean)
+  const points = [originPoint, destinationPoint, driver?.position, ...line, ...orderPoints].filter(Boolean)
+  return <div className={`rumbo-map relative overflow-hidden rounded-[1.6rem] border border-white/10 bg-[#0a111c] ${className}`}>
+    <MapContainer center={destinationPoint || originPoint || monterreyCenter} zoom={12} scrollWheelZoom className="h-full w-full" zoomControl={false} attributionControl>
+      <TileLayer url={tileUrl} attribution={tileAttribution} />
+      {showBounds && <Bounds points={points} />}
+      {interactive && <ClickToPlace onChange={onDestinationChange} />}
+      {line.length > 1 && <><Polyline positions={line} pathOptions={{ color: '#06b6d4', weight: 8, opacity: .18, lineCap: 'round' }} /><Polyline positions={line} pathOptions={{ color: '#8b5cf6', weight: 4, opacity: .96, lineCap: 'round' }} /></>}
+      {originPoint && <Marker position={originPoint} icon={icon('pickup')}><Tooltip direction="top" offset={[0, -12]}>{origin?.name || 'Origen · Rumbo Kitchen'}</Tooltip></Marker>}
+      {destinationPoint && <Marker position={destinationPoint} icon={icon('destination')} draggable={interactive} eventHandlers={{ dragend: (event) => { const point = event.target.getLatLng(); onDestinationChange?.([point.lat, point.lng]) } }}><Tooltip direction="top" offset={[0, -12]} permanent={interactive}>{destination?.name || 'Entrega'}</Tooltip></Marker>}
+      {driver?.position && <Marker position={driver.position} icon={icon('driver', driver.bearing)}><Tooltip direction="top" offset={[0, -12]}>{driver.name || 'Courier Rumbo'} · {driver.street_name || 'En ruta'}</Tooltip></Marker>}
+      {orderPoints.map((point, index) => <CircleMarker key={`${point.join('-')}-${index}`} center={point} radius={6} pathOptions={{ color: '#22d3ee', fillColor: '#06b6d4', fillOpacity: .7 }} />)}
+    </MapContainer>
+    <div className="pointer-events-none absolute bottom-4 left-4 z-[500] rounded-xl border border-white/10 bg-black/55 px-3 py-2 text-[9px] font-semibold tracking-[.16em] text-cyan/90 backdrop-blur">MONTERREY · LIVE STREET GRAPH</div>
   </div>
 }

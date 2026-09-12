@@ -1,17 +1,19 @@
 """FastAPI application factory for the Raspberry Pi edge server."""
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from edge_server.api import demo, health, websocket
+from edge_server.api import demo, health, routes, websocket
 from edge_server.config import get_settings
 from edge_server.data.telemetry_service import TelemetryService
 from edge_server.data.tiger_db import TigerDB
 from edge_server.logging_config import configure_logging
 from edge_server.live_order_service import LiveOrderCoordinator
+from edge_server.routing.routing_engine import RoutingEngine
 from edge_server.simulation.simulation_engine import SimulationEngine
 from edge_server.websocket_manager import ConnectionManager
 
@@ -27,20 +29,36 @@ def create_app() -> FastAPI:
         telemetry = TelemetryService(TigerDB(settings.tiger_db_url, settings.use_tiger))
         await telemetry.start()
         app.state.engine = SimulationEngine(settings, telemetry, app.state.connections.broadcast)
-        app.state.live_orders = LiveOrderCoordinator(app.state.engine.gemini_agent)
+        app.state.routing = RoutingEngine(settings.osrm_url, settings.use_osrm)
+        app.state.live_orders = LiveOrderCoordinator(app.state.engine.gemini_agent, app.state.routing)
+        telemetry_stop = asyncio.Event()
+
+        async def advance_live_mesh() -> None:
+            while not telemetry_stop.is_set():
+                await asyncio.sleep(0.5)
+                for update in await app.state.live_orders.advance(0.5):
+                    await app.state.connections.broadcast("DRIVER_TELEMETRY", update)
+                await app.state.connections.broadcast("LIVE_METRICS", app.state.live_orders.snapshot()["metrics"])
+
+        telemetry_task = asyncio.create_task(advance_live_mesh(), name="rumbo-live-telemetry")
         yield
+        telemetry_stop.set()
+        telemetry_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await telemetry_task
         await app.state.engine.stop()
         await telemetry.close()
 
-    app = FastAPI(title="Courier Edge Decision System", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Rumbo | Edge Logistics OS", version="0.2.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
     @app.get("/", tags=["root"])
     async def root() -> dict:
-        return {"service": "Courier Edge Decision System", "docs": "/docs", "health": "/health", "websocket": "/ws"}
+        return {"service": "Rumbo | Edge Logistics OS", "docs": "/docs", "health": "/health", "websocket": "/ws"}
 
     app.include_router(health.router)
     app.include_router(demo.router)
+    app.include_router(routes.router)
     app.include_router(websocket.router)
     return app
 

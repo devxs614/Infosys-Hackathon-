@@ -1,20 +1,19 @@
-# Courier Edge Decision System
+# Rumbo | Edge Logistics OS
 
 **Infosys HackMTY 2026 — Challenge 3: The Courier**
 
 ## Rumbo interface
 
-The dashboard is now branded **Rumbo | Edge Logistics OS**. Its single React application exposes four shareable routes backed by the same Raspberry Pi WebSocket:
+The dashboard is now branded **Rumbo | Edge Logistics OS**. Its single React application uses a dynamic local session and may be opened from any number of laptops backed by the same Raspberry Pi WebSocket:
 
 | Route | Demo account | Purpose |
 | --- | --- | --- |
-| `/` | Role selector | Glassmorphic Rumbo landing with the four demo roles. |
-| `/app/client?id=1` | `cliente1` / `123` | San Pedro client menu, 3D products and order tracking. |
-| `/app/client?id=2` | `cliente2` / `123` | Tec / Valle client menu, 3D products and order tracking. |
-| `/app/driver` | `driver1` / `123` | Courier HUD, Edge batch alert and delivery controls. |
-| `/app/dashboard` | `admin` / `123` | Apple-style bento Command Center and judge controls. |
+| `/` | Login / Registro | Glassmorphic session flow for any Cliente or Repartidor, plus demo buttons. |
+| `/app/client` | Dynamic client | Restaurant, address search / draggable map pin, price and OSRM route preview. |
+| `/app/driver` | Dynamic courier | Assignment, navigation HUD and interpolated live telemetry. |
+| `/app/dashboard` | Command Center | Apple-style bento operating picture for all active clients, orders and drivers. |
 
-The client menu uses React Three Fiber/Drei; page and modal transitions use Framer Motion; the UI uses Tailwind CSS, Lucide icons, and a dark vector map that continues to render without map tiles. See the Rumbo WebSocket protocol in [docs/api-contract.md](docs/api-contract.md#rumbo-live-order-messages).
+Page and modal transitions use Framer Motion; the UI uses Tailwind CSS, Lucide icons, and a Leaflet map with CartoDB Dark Matter tiles. Routes come from OSRM through the Edge node and fall back gracefully when the Pi is offline. See the dynamic Rumbo protocol in [docs/api-contract.md](docs/api-contract.md#rumbo-live-order-messages).
 
 Courier Edge Decision System is a resilient edge simulation for comparing a reasonable reactive courier against a strategic AI/Gemini courier. It converts a four-hour shift into a three-minute reproducible demo, measures MXN per simulated hour, earnings, distance and late deliveries, and shows the comparison on a laptop dashboard.
 

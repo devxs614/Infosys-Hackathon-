@@ -3,6 +3,7 @@ import pytest
 from edge_server.config import Settings
 from edge_server.data.telemetry_service import TelemetryService
 from edge_server.data.tiger_db import TigerDB
+from edge_server.models import EventType, JudgeEvent
 from edge_server.simulation.clock import SimulationClock
 from edge_server.simulation.simulation_engine import SimulationEngine
 
@@ -22,3 +23,12 @@ async def test_two_worlds_receive_the_same_initial_scenario():
     assert set(engine.baseline_world.orders) == set(engine.ai_world.orders)
     assert len(telemetry.memory) == 2
 
+
+@pytest.mark.asyncio
+async def test_judge_event_updates_traffic_without_waiting_for_a_simulation_tick():
+    telemetry = TelemetryService(TigerDB(enabled=False))
+    engine = SimulationEngine(Settings(use_osrm=False, use_gemini=False, use_tiger=False), telemetry)
+    await engine.trigger(JudgeEvent(event_type=EventType.SAN_PEDRO_CONGESTION))
+    state = engine.state()
+    assert state.traffic.congestion_level == "heavy"
+    assert state.traffic.global_factor >= 1.55

@@ -27,9 +27,12 @@ async def reset_demo(request: Request) -> dict:
 @router.post("/trigger")
 async def trigger_demo(event: JudgeEvent, request: Request) -> dict:
     await request.app.state.engine.trigger(event)
-    batch = await request.app.state.live_orders.recalculate(event.event_type.value)
+    state = request.app.state.engine.state()
+    batch = await request.app.state.live_orders.recalculate(event.event_type.value, state.traffic, state.weather)
     if batch:
         await request.app.state.connections.broadcast("AI_BATCH_SUGGESTION", batch.model_dump(mode="json"))
+        await request.app.state.connections.broadcast("AI_BATCH_OPTIMIZATION", batch.model_dump(mode="json"))
+        await request.app.state.connections.broadcast("LIVE_ORDER_STATE", request.app.state.live_orders.snapshot())
     return {"status": "triggered", "event": event.model_dump()}
 
 
@@ -41,7 +44,10 @@ async def demo_state(request: Request) -> dict:
 @router.post("/judge-event")
 async def judge_event(event: JudgeEvent, request: Request) -> dict:
     await request.app.state.engine.trigger(event)
-    batch = await request.app.state.live_orders.recalculate(event.event_type.value)
+    state = request.app.state.engine.state()
+    batch = await request.app.state.live_orders.recalculate(event.event_type.value, state.traffic, state.weather)
     if batch:
         await request.app.state.connections.broadcast("AI_BATCH_SUGGESTION", batch.model_dump(mode="json"))
+        await request.app.state.connections.broadcast("AI_BATCH_OPTIMIZATION", batch.model_dump(mode="json"))
+        await request.app.state.connections.broadcast("LIVE_ORDER_STATE", request.app.state.live_orders.snapshot())
     return {"status": "accepted", "event": event.model_dump()}

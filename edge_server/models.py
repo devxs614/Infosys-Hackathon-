@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -104,6 +104,7 @@ class RouteEstimate(BaseModel):
     distance_km: float = Field(ge=0)
     duration_minutes: float = Field(ge=0)
     geometry: list[list[float]] = Field(default_factory=list)
+    street_names: list[str] = Field(default_factory=list)
     feasible: bool = True
     warnings: list[str] = Field(default_factory=list)
 
@@ -184,32 +185,115 @@ class SocketMessage(BaseModel):
     data: dict[str, Any]
 
 
-class LiveOrderRequest(BaseModel):
-    """Client-originated order contract accepted by the central WebSocket."""
+class UserRegistration(BaseModel):
+    """A browser-local identity announced to the Edge node, never a credential store."""
 
-    client_id: Literal["client_1", "client_2"]
-    location: list[float] = Field(min_length=2, max_length=2)
-    items: list[dict[str, Any]] = Field(min_length=1)
+    id: str = Field(min_length=3, max_length=100)
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
+    role: Literal["client", "driver", "admin"]
+    location: list[float] | None = None
 
     @field_validator("location")
     @classmethod
-    def monterrey_coordinates(cls, value: list[float]) -> list[float]:
-        lat, lon = value
-        if not 25.4 <= lat <= 26.0 or not -100.7 <= lon <= -99.9:
-            raise ValueError("location must be inside the Monterrey metropolitan demo area")
+    def registered_location_is_local(cls, value: list[float] | None) -> list[float] | None:
+        if value is not None:
+            validate_monterrey_coordinates(value)
         return value
 
 
+def validate_monterrey_coordinates(value: list[float]) -> list[float]:
+    if len(value) != 2:
+        raise ValueError("coordinates must be [lat, lon]")
+    lat, lon = value
+    if not 25.4 <= lat <= 26.0 or not -100.7 <= lon <= -99.9:
+        raise ValueError("coordinates must be inside the Monterrey metropolitan demo area")
+    return [float(lat), float(lon)]
+
+
+class RouteRequest(BaseModel):
+    origin: list[float] = Field(min_length=2, max_length=2)
+    destination: list[float] = Field(min_length=2, max_length=2)
+
+    @field_validator("origin", "destination")
+    @classmethod
+    def route_coordinates_are_local(cls, value: list[float]) -> list[float]:
+        return validate_monterrey_coordinates(value)
+
+
+class LiveOrderRequest(BaseModel):
+    """Dynamic client-originated order contract with a legacy `location` adapter.
+
+    `location` is retained only so the two original demo laptops continue working. New
+    clients send `origin` and `destination`, both in `[lat, lon]` form.
+    """
+
+    client_id: str = Field(min_length=3, max_length=100)
+    client_name: str = Field(default="Cliente Rumbo", min_length=2, max_length=120)
+    restaurant: str = Field(default="Rumbo Kitchen", min_length=2, max_length=120)
+    origin: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    destination: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    destination_label: str = Field(default="Destino Monterrey", min_length=2, max_length=160)
+    location: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    items: list[dict[str, Any]] = Field(min_length=1, max_length=30)
+
+    @field_validator("origin", "destination", "location")
+    @classmethod
+    def monterrey_coordinates(cls, value: list[float] | None) -> list[float] | None:
+        return validate_monterrey_coordinates(value) if value is not None else value
+
+    @model_validator(mode="after")
+    def normalize_legacy_location(self) -> "LiveOrderRequest":
+        if self.destination is None and self.location is not None:
+            self.destination = self.location
+        if self.destination is None:
+            raise ValueError("destination is required")
+        if self.origin is None:
+            self.origin = [25.6550, -100.3780]
+        return self
+
+
 class DriverActionRequest(BaseModel):
-    action: Literal["ACCEPT_BATCH", "ARRIVED_RESTAURANT", "DELIVERED_CLIENT_1", "DELIVERED_CLIENT_2"]
+    action: Literal[
+        "ACCEPT_BATCH", "ARRIVED_RESTAURANT", "DELIVERED_CLIENT_1", "DELIVERED_CLIENT_2",
+        "ACCEPT_ASSIGNMENT", "START_DELIVERY", "DELIVERED",
+    ]
+    driver_id: str | None = Field(default=None, min_length=3, max_length=100)
+    order_id: str | None = Field(default=None, min_length=3, max_length=100)
+    batch_id: str | None = Field(default=None, min_length=3, max_length=100)
+
+
+class DriverTelemetryRequest(BaseModel):
+    driver_id: str = Field(min_length=3, max_length=100)
+    position: list[float] = Field(min_length=2, max_length=2)
+    bearing: float = Field(default=0, ge=0, lt=360)
+    street_name: str = Field(default="Monterrey", min_length=1, max_length=120)
+    speed_kmh: float = Field(default=0, ge=0, le=160)
+
+    @field_validator("position")
+    @classmethod
+    def telemetry_coordinates_are_local(cls, value: list[float]) -> list[float]:
+        return validate_monterrey_coordinates(value)
 
 
 class LiveOrder(BaseModel):
     id: str
-    client_id: Literal["client_1", "client_2"]
+    client_id: str
+    client_name: str = "Cliente Rumbo"
+    restaurant: str = "Rumbo Kitchen"
+    origin: list[float] = Field(default_factory=lambda: [25.6550, -100.3780])
+    destination: list[float] = Field(default_factory=lambda: [25.6866, -100.3161])
+    destination_label: str = "Destino Monterrey"
     location: list[float]
     items: list[dict[str, Any]]
-    status: str = "REQUESTED"
+    status: str = "PENDING"
+    driver_id: str | None = None
+    batch_id: str | None = None
+    distance_km: float = 0
+    eta_minutes: float = 0
+    delivery_fee_mxn: float = 0
+    route_geometry: list[list[float]] = Field(default_factory=list)
+    street_names: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -224,3 +308,4 @@ class BatchPlan(BaseModel):
     savings_percent: float = Field(ge=0, le=100)
     reasoning: str
     status: str = "SUGGESTED"
+    driver_id: str | None = None

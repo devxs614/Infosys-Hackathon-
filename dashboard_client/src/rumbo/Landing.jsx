@@ -1,41 +1,49 @@
 import { motion } from 'framer-motion'
-import { ArrowRight, Bot, Gauge, MapPin, Navigation, Sparkles, UserRound } from 'lucide-react'
+import { ArrowRight, Compass, Mail, ShieldCheck, Sparkles, Truck, UserRound } from 'lucide-react'
 import { useState } from 'react'
 import { GlassCard } from './GlassCard'
-import { roles } from './data'
 
-const icons = { MapPin, Navigation, Gauge, Sparkles }
+const profilesKey = 'rumbo.profiles'
 
-function RoleCard({ role, selected, onSelect }) {
-  const [tilt, setTilt] = useState({ x: 0, y: 0 })
-  const Icon = icons[role.icon]
-  return <motion.button type="button" onClick={() => onSelect(role)} onMouseMove={(event) => {
-    const box = event.currentTarget.getBoundingClientRect()
-    setTilt({ x: ((event.clientY - box.top) / box.height - .5) * -8, y: ((event.clientX - box.left) / box.width - .5) * 10 })
-  }} onMouseLeave={() => setTilt({ x: 0, y: 0 })} animate={{ rotateX: tilt.x, rotateY: tilt.y, scale: selected ? 1.015 : 1 }} transition={{ type: 'spring', stiffness: 250, damping: 18 }} style={{ transformStyle: 'preserve-3d' }} className={`group relative overflow-hidden rounded-3xl border p-5 text-left transition ${selected ? 'border-cyan/70 bg-white/[.09] shadow-cyan' : 'border-white/10 bg-white/[.035] hover:border-white/30'}`}>
-    <div className={`absolute inset-x-0 top-0 h-24 bg-gradient-to-br ${role.tint} opacity-30 blur-2xl transition group-hover:opacity-60`} />
-    <div style={{ transform: 'translateZ(26px)' }} className="relative"><div className="mb-9 flex items-start justify-between"><span className="rounded-2xl border border-white/15 bg-black/20 p-3 text-white"><Icon size={20} /></span><span className="text-[10px] font-semibold uppercase tracking-[.18em] text-white/50">{role.place}</span></div><p className="text-lg font-semibold tracking-tight text-white">{role.name}</p><p className="mt-1 text-xs leading-5 text-white/55">{role.description}</p><div className="mt-5 flex items-center gap-2 text-[11px] text-white/70"><UserRound size={13} /> {role.user} · demo access</div></div>
-  </motion.button>
+function idFor(email, role) {
+  const safe = email.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 42) || 'rumbo-user'
+  return `${role}-${safe}-${Math.random().toString(36).slice(2, 7)}`
 }
 
-export function Landing({ onNavigate }) {
-  const [selected, setSelected] = useState(roles[0])
-  const [username, setUsername] = useState(roles[0].user)
-  const [password, setPassword] = useState(roles[0].pass)
+function storedProfiles() {
+  try { return JSON.parse(window.localStorage.getItem(profilesKey) || '[]') } catch { return [] }
+}
+
+export function Landing({ onAuthenticated }) {
+  const [role, setRole] = useState('client')
+  const [flow, setFlow] = useState('register')
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
-  const choose = (role) => { setSelected(role); setUsername(role.user); setPassword(role.pass); setError('') }
   const submit = (event) => {
     event.preventDefault()
-    const match = roles.find((role) => role.user === username.trim() && role.pass === password)
-    if (!match) return setError('Acceso de demo no reconocido. Selecciona un perfil Rumbo.')
-    onNavigate(match.route)
+    const normalizedEmail = email.trim().toLowerCase()
+    if (!normalizedEmail.includes('@') || password.trim().length < 3 || (flow === 'register' && name.trim().length < 2)) {
+      return setError('Completa nombre, correo y una contraseña de al menos 3 caracteres.')
+    }
+    const profiles = storedProfiles()
+    const existing = profiles.find((item) => item.email === normalizedEmail && item.role === role)
+    if (flow === 'login' && (!existing || existing.password !== password)) return setError('No encontramos esa sesión local. Regístrate o usa una demo.')
+    const next = flow === 'login' ? existing : { id: idFor(normalizedEmail, role), name: name.trim(), email: normalizedEmail, role, password }
+    if (flow === 'register') window.localStorage.setItem(profilesKey, JSON.stringify([...profiles.filter((item) => !(item.email === normalizedEmail && item.role === role)), next]))
+    const { password: _password, ...publicProfile } = next
+    onAuthenticated(publicProfile)
   }
-  return <main className="rumbo-noise relative min-h-screen overflow-hidden bg-ink px-5 py-6 sm:px-8 lg:px-12"><div className="grid-fade pointer-events-none absolute inset-x-0 top-0 h-[480px] opacity-60" />
-    <header className="relative mx-auto flex max-w-7xl items-center justify-between"><div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-violet to-cyan shadow-glow"><Navigation size={20} /></div><div><p className="text-sm font-semibold tracking-tight">Rumbo</p><p className="text-[10px] tracking-[.16em] text-white/45">EDGE LOGISTICS OS</p></div></div><div className="glass rounded-full px-4 py-2 text-xs text-white/55">Monterrey, MX <span className="ml-2 text-cyan">● Online</span></div></header>
-    <section className="relative mx-auto grid max-w-7xl gap-8 py-16 lg:grid-cols-[1.22fr_.78fr] lg:py-24"><div><motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="eyebrow">RUMBO / LIVE DEMO</motion.p><motion.h1 initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: .08 }} className="mt-4 max-w-3xl text-5xl font-semibold leading-[.94] tracking-[-.07em] text-white sm:text-7xl">La última milla,<br /><span className="bg-gradient-to-r from-violet via-fuchsia-300 to-cyan bg-clip-text text-transparent">en perfecta sincronía.</span></motion.h1><p className="mt-7 max-w-xl text-base leading-7 text-white/55">Una experiencia de logística viva: clientes, courier y la inteligencia Edge de Rumbo comparten una sola decisión, en tiempo real.</p>
-        <div className="mt-10 grid gap-3 sm:grid-cols-2">{roles.map((role) => <RoleCard key={role.id} role={role} selected={role.id === selected.id} onSelect={choose} />)}</div>
-      </div>
-      <GlassCard delay={.18} className="h-fit p-6 sm:p-8 lg:sticky lg:top-10"><div className="mb-9 flex items-center gap-3"><div className="rounded-2xl border border-cyan/30 bg-cyan/10 p-3 text-cyan"><Bot size={21} /></div><div><p className="text-sm font-medium">Acceso Rumbo</p><p className="mt-1 text-xs text-white/45">Elige un rol para continuar</p></div></div><form onSubmit={submit} className="space-y-4"><label className="block text-xs text-white/50">Usuario<input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm outline-none transition focus:border-cyan/60" /></label><label className="block text-xs text-white/50">Contraseña<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" className="mt-2 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm outline-none transition focus:border-cyan/60" /></label>{error && <p className="rounded-2xl border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">{error}</p>}<button className="app-button-primary w-full py-3.5">Entrar como {selected.name}<ArrowRight size={16} /></button></form><p className="mt-6 text-center text-[10px] leading-5 text-white/35">Credenciales de demo locales. El backend valida pedidos y acciones en la Raspberry Pi.</p></GlassCard>
+  const enterDemo = (demoRole) => onAuthenticated({
+    id: `${demoRole}-demo-${Math.random().toString(36).slice(2, 7)}`,
+    name: demoRole === 'driver' ? 'Alex · Courier Demo' : 'Sofía · Cliente Demo',
+    email: `${demoRole}.demo@rumbo.local`, role: demoRole,
+  })
+  return <main className="rumbo-noise min-h-screen overflow-hidden bg-ink px-5 py-6 sm:px-8">
+    <div className="mx-auto flex max-w-7xl items-center justify-between"><div className="flex items-center gap-3"><span className="rounded-2xl bg-gradient-to-br from-violet to-cyan p-2.5 shadow-glow"><Compass size={20} /></span><div><p className="font-semibold tracking-tight">Rumbo</p><p className="text-[9px] tracking-[.2em] text-white/45">EDGE LOGISTICS OS</p></div></div><div className="hidden items-center gap-2 text-xs text-white/50 sm:flex"><ShieldCheck size={15} className="text-cyan" />Raspberry Pi · live mesh</div></div>
+    <section className="mx-auto grid max-w-7xl items-center gap-10 py-12 lg:grid-cols-[1.08fr_.92fr] lg:py-20"><div className="relative"><div className="grid-fade absolute -inset-10 opacity-70" /><motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="relative"><p className="eyebrow">MONTERREY · DELIVERY INTELLIGENCE</p><h1 className="mt-5 max-w-3xl text-5xl font-semibold leading-[.93] tracking-[-.075em] sm:text-7xl">La ciudad se mueve<br /><span className="bg-gradient-to-r from-violet-300 via-white to-cyan bg-clip-text text-transparent">con Rumbo.</span></h1><p className="mt-7 max-w-xl text-sm leading-7 text-white/55">Una red logística local diseñada para pedidos, couriers y decisiones Edge en tiempo real. Crea tu acceso en segundos: no hay cupos ni perfiles predeterminados.</p><div className="mt-10 grid max-w-xl grid-cols-3 gap-3"><div className="glass rounded-3xl p-4"><p className="text-2xl font-semibold tracking-tight text-cyan">120×</p><p className="mt-1 text-[10px] leading-4 text-white/45">Time warp<br />operativo</p></div><div className="glass rounded-3xl p-4"><p className="text-2xl font-semibold tracking-tight text-violet-300">OSRM</p><p className="mt-1 text-[10px] leading-4 text-white/45">Calles reales<br />de Monterrey</p></div><div className="glass rounded-3xl p-4"><p className="text-2xl font-semibold tracking-tight text-white">Live</p><p className="mt-1 text-[10px] leading-4 text-white/45">Multi-laptop<br />WebSocket</p></div></div></motion.div></div>
+      <GlassCard delay={.12} className="relative overflow-hidden p-6 sm:p-8"><div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-cyan/20 blur-3xl" /><div className="relative"><div className="flex rounded-2xl border border-white/10 bg-black/20 p-1"><button onClick={() => { setRole('client'); setError('') }} className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-medium transition ${role === 'client' ? 'bg-white/10 text-white shadow-sm' : 'text-white/45'}`}><UserRound className="mr-2 inline" size={15} />Cliente</button><button onClick={() => { setRole('driver'); setError('') }} className={`flex-1 rounded-xl px-3 py-2.5 text-xs font-medium transition ${role === 'driver' ? 'bg-white/10 text-white shadow-sm' : 'text-white/45'}`}><Truck className="mr-2 inline" size={15} />Repartidor</button></div><div className="mt-6 flex gap-5 border-b border-white/10"><button onClick={() => { setFlow('register'); setError('') }} className={`pb-3 text-xs ${flow === 'register' ? 'border-b-2 border-cyan text-white' : 'text-white/45'}`}>Registro rápido</button><button onClick={() => { setFlow('login'); setError('') }} className={`pb-3 text-xs ${flow === 'login' ? 'border-b-2 border-cyan text-white' : 'text-white/45'}`}>Iniciar sesión</button></div><form onSubmit={submit} className="mt-6 space-y-3">{flow === 'register' && <label className="block"><span className="mb-1.5 block text-[10px] font-medium tracking-[.14em] text-white/45">NOMBRE</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Carlos Treviño" className="rumbo-input" autoComplete="name" /></label>}<label className="block"><span className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium tracking-[.14em] text-white/45"><Mail size={12} />CORREO</span><input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="tu@correo.com" className="rumbo-input" autoComplete="email" /></label><label className="block"><span className="mb-1.5 block text-[10px] font-medium tracking-[.14em] text-white/45">CONTRASEÑA</span><input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" type="password" className="rumbo-input" autoComplete={flow === 'register' ? 'new-password' : 'current-password'} /></label>{error && <p className="text-xs text-rose-300">{error}</p>}<button className="app-button-primary mt-2 w-full py-3.5">{flow === 'register' ? 'Crear acceso Rumbo' : 'Entrar a Rumbo'} <ArrowRight size={16} /></button></form><div className="my-5 flex items-center gap-3 text-[10px] text-white/30"><i className="h-px flex-1 bg-white/10" />o entra directo<i className="h-px flex-1 bg-white/10" /></div><div className="grid gap-2 sm:grid-cols-2"><button onClick={() => enterDemo('client')} className="app-button py-3 text-xs"><Sparkles size={15} />Cliente Demo</button><button onClick={() => enterDemo('driver')} className="app-button py-3 text-xs"><Truck size={15} />Driver Demo</button></div><p className="mt-5 text-center text-[10px] leading-4 text-white/35">La sesión se guarda en este navegador. Tu contraseña no se transmite al Edge node.</p></div></GlassCard>
     </section>
   </main>
 }

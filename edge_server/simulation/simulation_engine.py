@@ -222,7 +222,16 @@ class SimulationEngine:
         event = Disruption(id=f"MANUAL-{judge_event.event_type.value}", event_type=judge_event.event_type, zone=zone,
                            start_minute=self.clock.current_minute, active=judge_event.active, description=f"Judge triggered {judge_event.event_type.value}")
         self.event_engine.trigger(event)
+        # Judge controls must be immediately visible even before the seeded clock has
+        # started. The next simulation tick will produce the same values again.
+        active_events = self.event_engine.all_active(self._automatic_events)
+        weather, traffic = self.event_engine.conditions(active_events)
+        for world in (self.baseline_world, self.ai_world):
+            world.weather = weather.model_copy(deep=True)
+            world.traffic = traffic.model_copy(deep=True)
+            world.events = [item.model_copy(deep=True) for item in active_events]
         await self._publish("event", event.model_dump(mode="json"))
+        await self._publish("simulation_state", self.state().model_dump(mode="json"))
 
     def state(self) -> SimulationState:
         baseline_metrics = MetricsService.for_driver(self.baseline_world.driver)

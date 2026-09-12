@@ -1,2 +1,1 @@
-"""Courier Edge Decision System backend package."""
-
+"""Rumbo | Edge Logistics OS backend package."""

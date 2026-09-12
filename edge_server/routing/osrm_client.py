@@ -20,14 +20,15 @@ class OSRMClient:
         url = f"{self.base_url}/route/v1/driving/{coordinates}"
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.get(url, params={"overview": "false", "geometries": "geojson"})
+                response = await client.get(url, params={"overview": "full", "geometries": "geojson", "steps": "true"})
                 response.raise_for_status()
             route = response.json().get("routes", [None])[0]
             if not route:
                 return None
             geometry = route.get("geometry", {}).get("coordinates", [])
+            street_names = [step.get("name") for leg in route.get("legs", []) for step in leg.get("steps", []) if step.get("name")]
             return RouteEstimate(distance_km=route["distance"] / 1000, duration_minutes=route["duration"] / 60,
-                                 geometry=geometry, warnings=[])
+                                 geometry=geometry, street_names=list(dict.fromkeys(street_names)), warnings=[])
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             logger.warning("OSRM unavailable, using fallback: %s", exc.__class__.__name__)
             return None

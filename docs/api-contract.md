@@ -10,6 +10,7 @@ All REST responses are JSON. `GET /` returns service links. `GET /health` report
 | `GET /demo/state` | none | Current `SimulationState`. |
 | `POST /demo/trigger` | `{"event_type":"TORRENTIAL_RAIN","zone":"Monterrey"}` | Activates a judge event. |
 | `POST /demo/judge-event` | Same as trigger | Alias for judge tooling. |
+| `POST /route/estimate` | `{"origin":[lat,lon],"destination":[lat,lon]}` | OSRM street geometry, distance and ETA; local fallback when OSRM is unreachable. |
 | `WS /ws` | optional `{"type":"ping"}` | Receives state/event messages and answers with `pong`. |
 
 Every WebSocket frame has this envelope:
@@ -22,23 +23,46 @@ Types are `connection`, `hello_response`, `simulation_state`, `driver_update`, `
 
 ## Rumbo live-order messages
 
-The same central `/ws` connection also coordinates the Rumbo multi-screen demo. A client sends an order directly (or wraps its fields in `data`):
+The same central `/ws` connection coordinates any number of Rumbo clients and couriers. The browser keeps its session locally, then announces its public profile (no password is sent):
+
+```json
+{
+  "type": "REGISTER_USER",
+  "data": {
+    "id": "client-sofia-k82p",
+    "name": "Sofía Garza",
+    "email": "sofia@example.com",
+    "role": "client"
+  }
+}
+```
+
+For `role: "driver"`, an optional `location: [lat, lon]` makes that courier immediately eligible for proximity assignment. The server broadcasts `USER_REGISTERED`, `DRIVER_ONLINE`, `LIVE_ORDER_STATE`, and `LIVE_METRICS`. `USER_REGISTERED` and `DRIVER_ONLINE` are also accepted as backward-compatible registration aliases.
+
+A client sends a dynamic order directly (or wraps its fields in `data`):
 
 ```json
 {
   "type": "NEW_ORDER",
-  "client_id": "client_1",
-  "location": [25.65, -100.36],
-  "items": [{"id": "citrus-bowl", "name": "Citrus Bowl", "price": 198}]
+  "data": {
+    "client_id": "client-sofia-k82p",
+    "client_name": "Sofía Garza",
+    "restaurant": "Rumbo Kitchen · Centrito",
+    "origin": [25.6496, -100.3595],
+    "destination": [25.6517, -100.2892],
+    "destination_label": "Campus Tec",
+    "items": [{"id": "citrus-bowl", "name": "Citrus Bowl", "price": 198, "quantity": 1}]
+  }
 }
 ```
 
-`client_id` is `client_1` or `client_2`; coordinates are validated to the Monterrey demo area. The server broadcasts `NEW_ORDER`. As soon as one order from each client exists, it calculates real geodesic distance savings and broadcasts `AI_BATCH_SUGGESTION` and `DRIVER_NOTIFICATION`. The batch payload includes `route`, `individual_distance_km`, `batch_distance_km`, `savings_percent`, `reasoning`, and `status`.
+Every coordinate is validated to the Monterrey metro area. The Edge server calls OSRM for street geometry when available, computes the delivery fee and ETA, assigns the nearest online courier, and broadcasts `NEW_ORDER`. Nearby unbatched orders are evaluated by Gemini and produce `AI_BATCH_OPTIMIZATION`, `AI_BATCH_SUGGESTION`, and `DRIVER_NOTIFICATION`. The batch payload includes `route`, `individual_distance_km`, `batch_distance_km`, `savings_percent`, `reasoning`, `status`, and `driver_id`.
 
-The courier sends one of these messages:
+The courier accepts a route and publishes telemetry with:
 
 ```json
-{"type":"DRIVER_ACTION","action":"ACCEPT_BATCH"}
+{"type":"DRIVER_ACTION","data":{"action":"ACCEPT_ASSIGNMENT","driver_id":"driver-alex-r3m","order_id":"RUM-0001"}}
+{"type":"DRIVER_TELEMETRY","data":{"driver_id":"driver-alex-r3m","position":[25.652,-100.31],"bearing":42,"street_name":"Av. Lázaro Cárdenas","speed_kmh":45}}
 ```
 
-Other valid actions are `ARRIVED_RESTAURANT`, `DELIVERED_CLIENT_1`, and `DELIVERED_CLIENT_2`. The server broadcasts `DRIVER_ACTION` with the updated batch and order state. Judge traffic events recalculate the visible live recommendation through the existing `/demo/trigger` endpoint.
+Actions are `ACCEPT_ASSIGNMENT`, `ACCEPT_BATCH`, `ARRIVED_RESTAURANT`, `START_DELIVERY`, and `DELIVERED`; the original demo action names remain accepted. The Raspberry also emits a server-side `DRIVER_TELEMETRY` snapshot twice per second during the accelerated simulation. Clients interpolate those points at display frame rate. Judge traffic events recalculate the visible live recommendation through `/demo/trigger`.
