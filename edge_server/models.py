@@ -292,6 +292,8 @@ class LiveOrder(BaseModel):
     distance_km: float = 0
     eta_minutes: float = 0
     delivery_fee_mxn: float = 0
+    courier_payout_mxn: float = 0
+    platform_commission_mxn: float = 0
     route_geometry: list[list[float]] = Field(default_factory=list)
     street_names: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
@@ -309,3 +311,6 @@ class BatchPlan(BaseModel):
     reasoning: str
     status: str = "SUGGESTED"
     driver_id: str | None = None
+    baseline_duration_minutes: float = 0
+    optimized_duration_minutes: float = 0
+    courier_earning_improvement_percent: float = 0

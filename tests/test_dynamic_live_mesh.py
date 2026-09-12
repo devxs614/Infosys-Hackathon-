@@ -37,3 +37,74 @@ def test_dynamic_driver_is_assigned_to_a_dynamic_client_order():
             socket.send_json({"type": "DRIVER_ACTION", "data": {"action": "ACCEPT_ASSIGNMENT", "driver_id": "driver-alex", "order_id": order["id"]}})
             action = _receive_until(socket, "DRIVER_ACTION")
             assert action["data"]["orders"][0]["status"] == "IN_TRANSIT"
+
+
+def test_match_financial_and_verdict_events_keep_the_public_driver_profile():
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            _receive_until(socket, "live_order_state")
+            socket.send_json({
+                "type": "REGISTER_USER",
+                "data": {"id": "driver-rogelio", "name": "Rogelio Mendoza", "email": "rogelio@example.com", "role": "driver", "location": [25.65, -100.35]},
+            })
+            _receive_until(socket, "DRIVER_ONLINE")
+            socket.send_json({
+                "type": "NEW_ORDER",
+                "data": {"client_id": "client-ana", "client_name": "Ana", "restaurant": "Centrito", "origin": [25.6496, -100.3595],
+                         "destination": [25.6488, -100.3574], "destination_label": "Centrito Valle", "items": [{"id": "bowl", "price": 198}]},
+            })
+            match = _receive_until(socket, "ORDER_MATCHED")["data"]
+            assert match["driver"]["name"] == "Rogelio Mendoza"
+            assert match["driver"]["vehicle"] == "Honda Cargo 150"
+            assert match["driver"]["rating"] == 4.9
+            assert match["financials"]["current_trip_earnings_mxn"] > 0
+            _receive_until(socket, "DRIVER_FINANCIAL_UPDATE")
+            verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
+            assert verdict["available"] is False
+
+
+def test_batch_emits_a_financial_impact_verdict():
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            _receive_until(socket, "live_order_state")
+            socket.send_json({"type": "REGISTER_USER", "data": {"id": "driver-luis", "name": "Luis", "email": "luis@example.com", "role": "driver", "location": [25.65, -100.35]}})
+            _receive_until(socket, "DRIVER_ONLINE")
+            for client_id, destination in (("client-uno", [25.6488, -100.3574]), ("client-dos", [25.6517, -100.3492])):
+                socket.send_json({"type": "NEW_ORDER", "data": {
+                    "client_id": client_id, "client_name": client_id, "restaurant": "Centrito", "origin": [25.6496, -100.3595],
+                    "destination": destination, "destination_label": "Valle", "items": [{"id": "bowl", "price": 198}],
+                }})
+                _receive_until(socket, "NEW_ORDER")
+            verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
+            assert verdict["available"] is True
+            assert verdict["baseline_distance_km"] >= verdict["optimized_distance_km"]
+            assert verdict["courier_earning_improvement_percent"] > 0
+
+
+def test_late_driver_registration_matches_pending_order_and_broadcasts_financials():
+    """A courier coming online after checkout receives the same live match contract."""
+    with TestClient(create_app()) as client:
+        with client.websocket_connect("/ws") as socket:
+            _receive_until(socket, "live_order_state")
+            socket.send_json({"type": "NEW_ORDER", "data": {
+                "client_id": "client-late", "client_name": "Mariana", "restaurant": "San Jeronimo",
+                "origin": [25.6896, -100.3584], "destination": [25.6794, -100.3441],
+                "destination_label": "Obispado", "items": [{"id": "bowl", "price": 198}],
+            }})
+            pending_order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
+            assert pending_order["status"] == "PENDING"
+
+            socket.send_json({"type": "REGISTER_USER", "data": {
+                "id": "driver-late", "name": "Rogelio Mendoza", "email": "late@example.com",
+                "role": "driver", "location": [25.68, -100.35],
+            }})
+            _receive_until(socket, "DRIVER_ONLINE")
+            match = _receive_until(socket, "ORDER_MATCHED")["data"]
+            assert match["order"]["id"] == pending_order["id"]
+            assert match["order"]["driver_id"] == "driver-late"
+            assert match["driver"]["name"] == "Rogelio Mendoza"
+            update = _receive_until(socket, "DRIVER_FINANCIAL_UPDATE")["data"]
+            assert update["financials"]["driver_id"] == "driver-late"
+            assert update["financials"]["current_trip_earnings_mxn"] > 0
+            verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
+            assert verdict["available"] is False

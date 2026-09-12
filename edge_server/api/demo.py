@@ -33,6 +33,7 @@ async def trigger_demo(event: JudgeEvent, request: Request) -> dict:
         await request.app.state.connections.broadcast("AI_BATCH_SUGGESTION", batch.model_dump(mode="json"))
         await request.app.state.connections.broadcast("AI_BATCH_OPTIMIZATION", batch.model_dump(mode="json"))
         await request.app.state.connections.broadcast("LIVE_ORDER_STATE", request.app.state.live_orders.snapshot())
+    await request.app.state.connections.broadcast("VERDICT_EVALUATION", request.app.state.live_orders.verdict_evaluation())
     return {"status": "triggered", "event": event.model_dump()}
 
 
@@ -50,4 +51,5 @@ async def judge_event(event: JudgeEvent, request: Request) -> dict:
         await request.app.state.connections.broadcast("AI_BATCH_SUGGESTION", batch.model_dump(mode="json"))
         await request.app.state.connections.broadcast("AI_BATCH_OPTIMIZATION", batch.model_dump(mode="json"))
         await request.app.state.connections.broadcast("LIVE_ORDER_STATE", request.app.state.live_orders.snapshot())
+    await request.app.state.connections.broadcast("VERDICT_EVALUATION", request.app.state.live_orders.verdict_evaluation())
     return {"status": "accepted", "event": event.model_dump()}

@@ -38,6 +38,8 @@ def create_app() -> FastAPI:
                 await asyncio.sleep(0.5)
                 for update in await app.state.live_orders.advance(0.5):
                     await app.state.connections.broadcast("DRIVER_TELEMETRY", update)
+                    await app.state.connections.broadcast("DRIVER_FINANCIAL_UPDATE", app.state.live_orders.driver_financial_update(update["driver_id"]))
+                await app.state.connections.broadcast("VERDICT_EVALUATION", app.state.live_orders.verdict_evaluation())
                 await app.state.connections.broadcast("LIVE_METRICS", app.state.live_orders.snapshot()["metrics"])
 
         telemetry_task = asyncio.create_task(advance_live_mesh(), name="rumbo-live-telemetry")

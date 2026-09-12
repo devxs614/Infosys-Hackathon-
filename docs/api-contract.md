@@ -56,7 +56,7 @@ A client sends a dynamic order directly (or wraps its fields in `data`):
 }
 ```
 
-Every coordinate is validated to the Monterrey metro area. The Edge server calls OSRM for street geometry when available, computes the delivery fee and ETA, assigns the nearest online courier, and broadcasts `NEW_ORDER`. Nearby unbatched orders are evaluated by Gemini and produce `AI_BATCH_OPTIMIZATION`, `AI_BATCH_SUGGESTION`, and `DRIVER_NOTIFICATION`. The batch payload includes `route`, `individual_distance_km`, `batch_distance_km`, `savings_percent`, `reasoning`, `status`, and `driver_id`.
+Every coordinate is validated to the Monterrey metro area. The Edge server calls OSRM for street geometry when available, computes the delivery fee and ETA, assigns the nearest online courier, and broadcasts `NEW_ORDER`. A matched order additionally emits `ORDER_MATCHED` with `{order, driver, financials}`; `driver` contains the public `name`, `avatar_url`, `vehicle`, and `rating` needed by the client confirmation card. Nearby unbatched orders are evaluated by Gemini and produce `AI_BATCH_OPTIMIZATION`, `AI_BATCH_SUGGESTION`, and `DRIVER_NOTIFICATION`. The batch payload includes `route`, `individual_distance_km`, `batch_distance_km`, duration comparison, `savings_percent`, `reasoning`, `status`, and `driver_id`.
 
 The courier accepts a route and publishes telemetry with:
 
@@ -65,4 +65,6 @@ The courier accepts a route and publishes telemetry with:
 {"type":"DRIVER_TELEMETRY","data":{"driver_id":"driver-alex-r3m","position":[25.652,-100.31],"bearing":42,"street_name":"Av. Lázaro Cárdenas","speed_kmh":45}}
 ```
 
-Actions are `ACCEPT_ASSIGNMENT`, `ACCEPT_BATCH`, `ARRIVED_RESTAURANT`, `START_DELIVERY`, and `DELIVERED`; the original demo action names remain accepted. The Raspberry also emits a server-side `DRIVER_TELEMETRY` snapshot twice per second during the accelerated simulation. Clients interpolate those points at display frame rate. Judge traffic events recalculate the visible live recommendation through `/demo/trigger`.
+Actions are `ACCEPT_ASSIGNMENT`, `ACCEPT_BATCH`, `ARRIVED_RESTAURANT`, `START_DELIVERY`, and `DELIVERED`; the original demo action names remain accepted. The Raspberry also emits a server-side `DRIVER_TELEMETRY` snapshot twice per second during the accelerated simulation. Each snapshot contains `progress`, so clients interpolate directly on the OSRM polyline at display frame rate and rotate the courier to its street bearing.
+
+`DRIVER_FINANCIAL_UPDATE` emits the courier's current-trip earnings, confirmed earnings today, projected total, completed deliveries, and batching time/distance savings. `VERDICT_EVALUATION` emits the baseline-vs-batch distance and duration comparison plus the generated financial impact message. Judge traffic events recalculate the visible live recommendation and publish an updated verdict through `/demo/trigger`.

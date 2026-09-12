@@ -31,6 +31,9 @@ from edge_server.routing.routing_engine import RoutingEngine
 PICKUP = [25.6550, -100.3780]
 MONTERREY_CENTER = [25.6866, -100.3161]
 TIME_WARP = 120
+BASE_COURIER_PAYOUT_MXN = 35.0
+COURIER_PAYOUT_PER_KM = 7.25
+BATCH_COURIER_BONUS_RATE = .12
 
 
 def _utc_now() -> str:
@@ -75,16 +78,104 @@ class LiveOrderCoordinator:
             "simulation_minutes": round(self.simulation_minutes, 1),
         }
 
+    @staticmethod
+    def _public_driver(driver: dict, status: str = "EN ESPERA") -> dict:
+        """Return only dashboard-safe profile and operational data for a courier."""
+        return {
+            "id": driver["id"],
+            "name": driver["name"],
+            "online": driver["online"],
+            "position": driver.get("position", MONTERREY_CENTER),
+            "bearing": driver.get("bearing", 0),
+            "speed_kmh": driver.get("speed_kmh", 0),
+            "street_name": driver.get("street_name", "Monterrey"),
+            "assigned_order_ids": driver.get("assigned_order_ids", []),
+            "vehicle": driver.get("vehicle", "Honda Cargo 150"),
+            "rating": driver.get("rating", 4.9),
+            "avatar_url": driver.get("avatar_url", ""),
+            "status": status,
+            "updated_at": driver.get("updated_at"),
+        }
+
+    def _driver_financials(self, driver_id: str) -> dict:
+        driver = self.drivers.get(driver_id)
+        if not driver:
+            return {"driver_id": driver_id, "current_trip_earnings_mxn": 0, "earnings_today_mxn": 0, "projected_today_mxn": 0,
+                    "completed_deliveries": 0, "batch_time_saved_minutes": 0, "batch_savings_percent": 0}
+        assigned = [order for order in self.orders.values() if order.driver_id == driver_id]
+        completed = [order for order in assigned if order.status == "DELIVERED"]
+        active = [order for order in assigned if order.status != "DELIVERED"]
+        driver_batches = [batch for batch in self.batches.values() if batch.driver_id == driver_id]
+        time_saved = sum(max(0, batch.baseline_duration_minutes - batch.optimized_duration_minutes) for batch in driver_batches)
+        savings = max((batch.savings_percent for batch in driver_batches), default=0)
+        return {
+            "driver_id": driver_id,
+            "driver_name": driver["name"],
+            "current_trip_earnings_mxn": round(sum(order.courier_payout_mxn for order in active), 2),
+            "earnings_today_mxn": round(sum(order.courier_payout_mxn for order in completed), 2),
+            "projected_today_mxn": round(sum(order.courier_payout_mxn for order in assigned), 2),
+            "completed_deliveries": len(completed),
+            "batch_time_saved_minutes": round(time_saved, 1),
+            "batch_savings_percent": round(savings, 1),
+        }
+
+    def financial_snapshot(self) -> dict:
+        driver_rows = [self._driver_financials(driver_id) for driver_id in self.drivers]
+        return {
+            "platform": {
+                "platform_commission_mxn": round(sum(order.platform_commission_mxn for order in self.orders.values()), 2),
+                "courier_payout_mxn": round(sum(order.courier_payout_mxn for order in self.orders.values()), 2),
+                "delivery_fee_mxn": round(sum(order.delivery_fee_mxn for order in self.orders.values()), 2),
+            },
+            "drivers": driver_rows,
+        }
+
+    def verdict_evaluation(self) -> dict:
+        batch = self.batch
+        if batch is None:
+            return {
+                "available": False, "baseline_distance_km": 0, "optimized_distance_km": 0,
+                "baseline_duration_minutes": 0, "optimized_duration_minutes": 0,
+                "time_saved_minutes": 0, "fuel_savings_percent": 0,
+                "courier_earning_improvement_percent": 0,
+                "message": "Rumbo Edge espera pedidos cercanos para evaluar un batching real.",
+            }
+        time_saved = max(0, batch.baseline_duration_minutes - batch.optimized_duration_minutes)
+        return {
+            "available": True, "batch_id": batch.id,
+            "baseline_distance_km": batch.individual_distance_km,
+            "optimized_distance_km": batch.batch_distance_km,
+            "baseline_duration_minutes": batch.baseline_duration_minutes,
+            "optimized_duration_minutes": batch.optimized_duration_minutes,
+            "time_saved_minutes": round(time_saved, 1),
+            "fuel_savings_percent": batch.savings_percent,
+            "courier_earning_improvement_percent": batch.courier_earning_improvement_percent,
+            "message": f"✅ DECISIÓN OPTIMAL: El Batching incrementó la ganancia proyectada del courier un {batch.courier_earning_improvement_percent:.0f}% y redujo {time_saved:.1f} min de operación.",
+        }
+
+    def order_match_payload(self, order: LiveOrder) -> dict | None:
+        if not order.driver_id or order.driver_id not in self.drivers:
+            return None
+        status = "EN TRÁNSITO" if order.status == "IN_TRANSIT" else "ASIGNADO"
+        return {"order": order.model_dump(mode="json"), "driver": self._public_driver(self.drivers[order.driver_id], status),
+                "financials": self._driver_financials(order.driver_id)}
+
+    def driver_financial_update(self, driver_id: str) -> dict:
+        return {"driver": self._public_driver(self.drivers[driver_id]) if driver_id in self.drivers else None,
+                "financials": self._driver_financials(driver_id), "platform": self.financial_snapshot()["platform"]}
+
     def snapshot(self) -> dict:
         batches = [batch.model_dump(mode="json") for batch in self.batches.values()]
         return {
             "users": list(self.users.values()),
-            "drivers": list(self.drivers.values()),
+            "drivers": [self._public_driver(driver) for driver in self.drivers.values()],
             "orders": [order.model_dump(mode="json") for order in self.orders.values()],
             "batches": batches,
             "batch": self.batch.model_dump(mode="json") if self.batch else None,
             "telemetry": self.telemetry,
             "metrics": self._metrics(),
+            "financials": self.financial_snapshot(),
+            "verdict": self.verdict_evaluation(),
         }
 
     async def register_user(self, payload: dict) -> dict:
@@ -98,6 +189,7 @@ class LiveOrderCoordinator:
                 "registered_at": _utc_now(),
             }
             self.users[request.id] = user
+            matched_order_ids: list[str] = []
             if request.role == "driver":
                 current = self.drivers.get(request.id, {})
                 position = request.location or current.get("position") or MONTERREY_CENTER
@@ -110,9 +202,28 @@ class LiveOrderCoordinator:
                     "speed_kmh": current.get("speed_kmh", 0),
                     "street_name": current.get("street_name", "Monterrey"),
                     "assigned_order_ids": current.get("assigned_order_ids", []),
+                    "vehicle": current.get("vehicle", "Honda Cargo 150"),
+                    "rating": current.get("rating", 4.9),
+                    "avatar_url": current.get("avatar_url", "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=160&q=80"),
                     "updated_at": _utc_now(),
                 }
-            return {"user": user, "driver": self.drivers.get(request.id), "metrics": self._metrics()}
+                # A courier may open its laptop after client orders are already in the
+                # mesh. Match those pending orders immediately instead of requiring a
+                # client to resubmit.
+                for batch in self.batches.values():
+                    if batch.driver_id:
+                        continue
+                    batch_orders = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders and self.orders[order_id].status == "PENDING"]
+                    if batch_orders:
+                        self._assign_driver(batch_orders, batch)
+                        matched_order_ids.extend(order.id for order in batch_orders if order.driver_id)
+                for order in self.orders.values():
+                    if order.status == "PENDING" and not order.driver_id:
+                        self._assign_driver([order])
+                        if order.driver_id:
+                            matched_order_ids.append(order.id)
+            driver = self._public_driver(self.drivers[request.id]) if request.id in self.drivers else None
+            return {"user": user, "driver": driver, "metrics": self._metrics(), "matched_order_ids": matched_order_ids}
 
     async def create_order(self, payload: dict) -> tuple[LiveOrder, BatchPlan | None]:
         request = LiveOrderRequest.model_validate(payload)
@@ -124,13 +235,21 @@ class LiveOrderCoordinator:
                 restaurant=request.restaurant, origin=request.origin, destination=request.destination,
                 destination_label=request.destination_label, location=request.destination, items=request.items,
                 distance_km=round(estimate.distance_km, 2), eta_minutes=round(estimate.duration_minutes, 1),
-                delivery_fee_mxn=round(39 + estimate.distance_km * 8.5, 2), route_geometry=estimate.geometry,
+                delivery_fee_mxn=round(39 + estimate.distance_km * 8.5, 2),
+                courier_payout_mxn=round(BASE_COURIER_PAYOUT_MXN + estimate.distance_km * COURIER_PAYOUT_PER_KM, 2),
+                platform_commission_mxn=round(max(0, 39 + estimate.distance_km * 8.5 - (BASE_COURIER_PAYOUT_MXN + estimate.distance_km * COURIER_PAYOUT_PER_KM)), 2), route_geometry=estimate.geometry,
                 street_names=estimate.street_names,
             )
             self.orders[order.id] = order
             partner = self._find_batch_partner(order)
             if partner:
                 batch = await self._build_batch((partner, order))
+                baseline_payout = partner.courier_payout_mxn + order.courier_payout_mxn
+                optimized_payout = round(baseline_payout * (1 + BATCH_COURIER_BONUS_RATE), 2)
+                total_distance = max(partner.distance_km + order.distance_km, .01)
+                for candidate in (partner, order):
+                    candidate.courier_payout_mxn = round(optimized_payout * candidate.distance_km / total_distance, 2)
+                    candidate.platform_commission_mxn = round(max(0, candidate.delivery_fee_mxn - candidate.courier_payout_mxn), 2)
                 self.batches[batch.id] = batch
                 self.batch = batch
                 self._assign_driver([partner, order], batch)
@@ -181,6 +300,11 @@ class LiveOrderCoordinator:
         geometry = list(leg_one.geometry)
         if leg_two.geometry:
             geometry.extend(leg_two.geometry[1:] if geometry else leg_two.geometry)
+        # Every client attached to this batch receives the shared route geometry.
+        # The UI can therefore render the courier on the same polyline it sees in the HUD.
+        for order in (first, second):
+            order.route_geometry = geometry
+            order.street_names = list(dict.fromkeys([*leg_one.street_names, *leg_two.street_names]))
         individual_distance = first.distance_km + second.distance_km
         batch_distance = leg_one.distance_km + leg_two.distance_km
         savings = max(0.0, (individual_distance - batch_distance) / max(individual_distance, 0.001) * 100)
@@ -192,6 +316,9 @@ class LiveOrderCoordinator:
             route=[[pickup[0], pickup[1]], *[[lat, lon] for lon, lat in geometry]],
             individual_distance_km=round(individual_distance, 2), batch_distance_km=round(batch_distance, 2),
             savings_percent=round(savings, 1), reasoning=reasoning,
+            baseline_duration_minutes=round(first.eta_minutes + second.eta_minutes, 1),
+            optimized_duration_minutes=round(leg_one.duration_minutes + leg_two.duration_minutes, 1),
+            courier_earning_improvement_percent=round(BATCH_COURIER_BONUS_RATE * 100, 1),
         )
 
     async def _strategic_reasoning(self, first: LiveOrder, second: LiveOrder, savings: float) -> str:
@@ -293,9 +420,16 @@ class LiveOrderCoordinator:
                     street_names = active.street_names
                 progress = min(1.0, driver.get(key, 0.0) + (real_seconds * TIME_WARP / 60) / route_minutes)
                 driver[key] = progress
-                index = min(len(geometry) - 1, int(progress * (len(geometry) - 1)))
+                segment_progress = progress * max(len(geometry) - 1, 1)
+                index = min(len(geometry) - 1, int(segment_progress))
+                next_index = min(index + 1, len(geometry) - 1)
+                segment_fraction = segment_progress - index
                 lon, lat = geometry[index]
-                next_lon, next_lat = geometry[min(index + 1, len(geometry) - 1)]
+                next_lon, next_lat = geometry[next_index]
+                # This is intentionally an interpolation on the OSRM geometry itself,
+                # not a straight-line shortcut between destinations.
+                lon = lon + (next_lon - lon) * segment_fraction
+                lat = lat + (next_lat - lat) * segment_fraction
                 position = [lat, lon]
                 bearing = _bearing(position, [next_lat, next_lon]) if index < len(geometry) - 1 else driver.get("bearing", 0)
                 street_index = min(len(street_names) - 1, int(progress * len(street_names))) if street_names else 0
@@ -343,9 +477,14 @@ class LiveOrderCoordinator:
                 geometry = list(leg_one.geometry)
                 if leg_two.geometry:
                     geometry.extend(leg_two.geometry[1:] if geometry else leg_two.geometry)
+                for order in orders:
+                    order.route_geometry = geometry
+                    order.street_names = list(dict.fromkeys([*leg_one.street_names, *leg_two.street_names]))
                 self.batch.route = [[first.origin[0], first.origin[1]], *[[lat, lon] for lon, lat in geometry]]
                 self.batch.individual_distance_km = round(sum(order.distance_km for order in orders), 2)
                 self.batch.batch_distance_km = round(leg_one.distance_km + leg_two.distance_km, 2)
+                self.batch.baseline_duration_minutes = round(sum(order.eta_minutes for order in orders), 1)
+                self.batch.optimized_duration_minutes = round(leg_one.duration_minutes + leg_two.duration_minutes, 1)
                 self.batch.savings_percent = round(max(0.0, (self.batch.individual_distance_km - self.batch.batch_distance_km) / max(self.batch.individual_distance_km, .001) * 100), 1)
             impacts = {
                 "TORRENTIAL_RAIN": "Lluvia torrencial: Rumbo recalculó la ruta y preservó el batch con prioridad de seguridad.",

@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
 import { useWebSocket } from './hooks/useWebSocket'
 import { ClientExperience } from './rumbo/ClientExperience'
+import { ClientAssignmentModal } from './rumbo/ClientAssignmentModal'
 import { CommandCenter } from './rumbo/CommandCenter'
 import { DriverHUD } from './rumbo/DriverHUD'
 import { Landing } from './rumbo/Landing'
@@ -17,7 +18,11 @@ function readSession() {
 function RouteScene({ path, query, navigate, liveState, socket, profile, onAuthenticated, onLogout }) {
   const onHome = () => navigate('/')
   const connected = socket.status === 'connected'
-  if (path === '/app/client' && profile?.role === 'client') return <ClientExperience profile={profile} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} />
+  if (path === '/app/client' && profile?.role === 'client') {
+    const clientOrder = (liveState.live.orders || []).find((order) => order.client_id === profile.id && order.status !== 'DELIVERED') || (liveState.live.orders || []).filter((order) => order.client_id === profile.id).at(-1)
+    const assignment = clientOrder ? liveState.live.orderMatches?.[clientOrder.id] : null
+    return <><ClientExperience profile={profile} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} /><ClientAssignmentModal assignment={assignment} /></>
+  }
   if (path === '/app/driver' && profile?.role === 'driver') return <DriverHUD profile={profile} live={liveState.live} notification={liveState.notification} onDismiss={liveState.dismissNotification} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} />
   if (path === '/app/dashboard') return <CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} />
   return <Landing onAuthenticated={onAuthenticated} />
