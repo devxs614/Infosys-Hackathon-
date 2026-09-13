@@ -23,9 +23,14 @@ from edge_server.routing.routing_engine import RoutingEngine
 
 TIME_WARP = 120
 MAX_DELIVERY_RADIUS_KM = 20.0
+MOTION_SECONDS_PER_KM = 3.0
 BASE_COURIER_PAYOUT_MXN = 35.0
 COURIER_PAYOUT_PER_KM = 7.25
 BATCH_COURIER_BONUS_RATE = .12
+CONGESTION_ZONES = {
+    "San Pedro": ([25.6500, -100.3500], 2.7, 2.2),
+    "Gonzalitos": ([25.6900, -100.3660], 2.4, 2.3),
+}
 
 
 class NoDriversAvailableError(ValueError):
@@ -61,6 +66,8 @@ class LiveOrderCoordinator:
         self._counter = 0
         self._batch_counter = 0
         self.simulation_minutes = 0.0
+        self.traffic = TrafficState()
+        self.weather = WeatherState()
         self._lock = asyncio.Lock()
 
     def _metrics(self) -> dict:
@@ -241,7 +248,7 @@ class LiveOrderCoordinator:
             self.dispatch_log = None
             if not self._candidate_drivers():
                 raise NoDriversAvailableError("No hay repartidores disponibles en este momento")
-        estimate = await self.routing.estimate(tuple(request.origin), tuple(request.destination), TrafficState(), WeatherState())
+        estimate, _ = await self._conditioned_route(request.origin, request.destination)
         if estimate.distance_km > MAX_DELIVERY_RADIUS_KM:
             raise ValueError("La dirección de entrega excede el límite operativo de 20 km")
         async with self._lock:
@@ -295,6 +302,43 @@ class LiveOrderCoordinator:
             return None
         return min(candidates, key=lambda order: haversine_km(order.destination[0], order.destination[1], incoming.destination[0], incoming.destination[1]))
 
+    def _route_penalties(self, estimate, origin: list[float], destination: list[float]) -> tuple[float, list[str]]:
+        """Apply local disruption cost only where an OSRM path enters its sector."""
+        factor = 1.0
+        notes: list[str] = []
+        if self.weather.rain_intensity >= .8:
+            notes.append("TORRENTIAL_RAIN (-35% speed)")
+        points = [[lat, lon] for lon, lat in estimate.geometry] or [origin, destination]
+        for zone in self.traffic.affected_zones:
+            config = CONGESTION_ZONES.get(zone)
+            if not config:
+                continue
+            center, radius_km, zone_factor = config
+            # OSRM geometries contain the actual street shape. The fallback only
+            # contains endpoints, so sample each segment as well: a corridor that
+            # crosses a disruption is penalised even if neither endpoint is in it.
+            sampled = list(points)
+            for start, end in zip(points, points[1:]):
+                steps = max(1, math.ceil(haversine_km(start[0], start[1], end[0], end[1]) / .2))
+                sampled.extend([
+                    [start[0] + (end[0] - start[0]) * step / steps, start[1] + (end[1] - start[1]) * step / steps]
+                    for step in range(1, steps)
+                ])
+            if any(haversine_km(point[0], point[1], center[0], center[1]) <= radius_km for point in sampled):
+                factor = max(factor, zone_factor)
+                disruption_name = {
+                    "San Pedro": "SAN_PEDRO_CONGESTION",
+                    "Gonzalitos": "GONZALITOS_FLOOD",
+                }.get(zone, zone.upper().replace(" ", "_"))
+                notes.append(f"{disruption_name} (x{zone_factor:.1f})")
+        return factor, notes
+
+    async def _conditioned_route(self, origin: list[float], destination: list[float]):
+        estimate = await self.routing.estimate(tuple(origin), tuple(destination), self.traffic, self.weather)
+        factor, notes = self._route_penalties(estimate, origin, destination)
+        estimate.duration_minutes = round(estimate.duration_minutes * factor, 2)
+        return estimate, notes
+
     def _candidate_drivers(self, orders: Iterable[LiveOrder] = ()) -> list[dict]:
         order_ids = {order.id for order in orders}
         return [
@@ -308,16 +352,16 @@ class LiveOrderCoordinator:
         candidates = self._candidate_drivers(orders)
         if not candidates:
             return None
-        evaluations: list[tuple[dict, float, float]] = []
+        evaluations: list[tuple[dict, float, float, list[str]]] = []
         for driver in candidates:
-            estimate = await self.routing.estimate(tuple(driver["position"]), tuple(origin), TrafficState(), WeatherState())
-            evaluations.append((driver, round(estimate.distance_km, 2), round(estimate.duration_minutes, 1)))
-        selected, selected_distance, selected_eta = min(
+            estimate, penalties = await self._conditioned_route(driver["position"], origin)
+            evaluations.append((driver, round(estimate.distance_km, 2), round(estimate.duration_minutes, 1), penalties))
+        selected, selected_distance, selected_eta, _ = min(
             evaluations,
             key=lambda value: (value[2], value[1], len(value[0]["assigned_order_ids"]), value[0]["id"]),
         )
         if len(evaluations) >= 2:
-            slowest_eta = max(eta for _, _, eta in evaluations)
+            slowest_eta = max(eta for _, _, eta, _ in evaluations)
             saved_minutes = max(0, round(slowest_eta - selected_eta, 1))
             self.dispatch_log = {
                 "order_ids": [order.id for order in orders],
@@ -326,14 +370,16 @@ class LiveOrderCoordinator:
                     {
                         "driver_id": driver["id"], "name": driver["name"],
                         "distance_km": distance, "eta_minutes": eta,
+                        "penalty": " · ".join(penalties) if penalties else "Clear corridor",
                         "selected": driver["id"] == selected["id"],
                     }
-                    for driver, distance, eta in evaluations
+                    for driver, distance, eta, penalties in evaluations
                 ],
                 "reason": (
-                    f"{selected['name']} reduces restaurant arrival by {saved_minutes:.1f} min "
-                    "and minimizes the delivery route footprint."
+                    f"{selected['name']} avoids the highest weather/traffic cost, saving "
+                    f"{saved_minutes:.1f} min despite the route distance."
                 ),
+                "weather_traffic_aware": True,
                 "selected_distance_km": selected_distance,
                 "selected_eta_minutes": selected_eta,
                 "created_at": _utc_now(),
@@ -370,9 +416,7 @@ class LiveOrderCoordinator:
         driver = self.drivers.get(orders[0].driver_id)
         if not driver or not driver.get("position"):
             return
-        estimate = await self.routing.estimate(
-            tuple(driver["position"]), tuple(orders[0].origin), TrafficState(), WeatherState(),
-        )
+        estimate, _ = await self._conditioned_route(driver["position"], orders[0].origin)
         for order in orders:
             order.courier_route_geometry = estimate.geometry
             order.courier_distance_km = round(estimate.distance_km, 2)
@@ -382,8 +426,8 @@ class LiveOrderCoordinator:
     async def _build_batch(self, orders: Iterable[LiveOrder]) -> BatchPlan:
         first, second = sorted(orders, key=lambda order: order.distance_km)
         pickup = first.origin
-        leg_one = await self.routing.estimate(tuple(pickup), tuple(first.destination), TrafficState(), WeatherState())
-        leg_two = await self.routing.estimate(tuple(first.destination), tuple(second.destination), TrafficState(), WeatherState())
+        leg_one, _ = await self._conditioned_route(pickup, first.destination)
+        leg_two, _ = await self._conditioned_route(first.destination, second.destination)
         geometry = list(leg_one.geometry)
         if leg_two.geometry:
             geometry.extend(leg_two.geometry[1:] if geometry else leg_two.geometry)
@@ -597,9 +641,9 @@ class LiveOrderCoordinator:
                     geometry = active.courier_route_geometry
                     if len(geometry) < 2:
                         continue
-                    route_minutes = max(active.courier_eta_minutes, 1)
+                    route_seconds = max(active.courier_distance_km * MOTION_SECONDS_PER_KM, .01)
                     key = f"_approach_{batch.id if batch else active.id}"
-                    progress = min(1.0, driver.get(key, 0.0) + (real_seconds * TIME_WARP / 60) / route_minutes)
+                    progress = min(1.0, driver.get(key, 0.0) + real_seconds / route_seconds)
                     driver[key] = progress
                     segment_progress = progress * (len(geometry) - 1)
                     index = min(len(geometry) - 1, int(segment_progress))
@@ -634,15 +678,15 @@ class LiveOrderCoordinator:
                 # a restaurant-specific route.
                 if batch and len(batch_orders) > 1:
                     geometry = [[lon, lat] for lat, lon in batch.route]
-                    route_minutes = max(sum(order.eta_minutes for order in batch_orders), 1)
+                    route_seconds = max(batch.batch_distance_km * MOTION_SECONDS_PER_KM, .01)
                     key = f"_progress_{batch.id}"
                     street_names = [name for order in batch_orders for name in order.street_names]
                 else:
                     geometry = active.route_geometry or [[active.origin[1], active.origin[0]], [active.destination[1], active.destination[0]]]
-                    route_minutes = max(active.eta_minutes, 1)
+                    route_seconds = max(active.distance_km * MOTION_SECONDS_PER_KM, .01)
                     key = f"_progress_{active.id}"
                     street_names = active.street_names
-                progress = min(1.0, driver.get(key, 0.0) + (real_seconds * TIME_WARP / 60) / route_minutes)
+                progress = min(1.0, driver.get(key, 0.0) + real_seconds / route_seconds)
                 driver[key] = progress
                 segment_progress = progress * max(len(geometry) - 1, 1)
                 index = min(len(geometry) - 1, int(segment_progress))
@@ -682,23 +726,36 @@ class LiveOrderCoordinator:
 
     async def recalculate(self, disruption: str, traffic: TrafficState | None = None, weather: WeatherState | None = None) -> BatchPlan | None:
         async with self._lock:
+            # The event engine owns the environment. Keep that latest state in the
+            # central coordinator so subsequent dispatches score the same conditions.
+            self.traffic = traffic.model_copy(deep=True) if traffic else TrafficState()
+            self.weather = weather.model_copy(deep=True) if weather else WeatherState()
+
+            active_orders = [
+                order for order in self.orders.values()
+                if order.status in {"PENDING", "MATCHED", "IN_TRANSIT"}
+            ]
+            # Refresh every active order's customer-facing ETA with the exact same
+            # sector-aware route-cost policy used to choose a courier.
+            for order in active_orders:
+                direct, _ = await self._conditioned_route(order.origin, order.destination)
+                order.distance_km = round(direct.distance_km, 2)
+                order.eta_minutes = round(direct.duration_minutes, 1)
+                order.route_geometry = direct.geometry
+                order.street_names = direct.street_names
+                order.delivery_fee_mxn = round(39 + direct.distance_km * 8.5, 2)
+
             if not self.batch:
                 return None
-            traffic, weather = traffic or TrafficState(), weather or WeatherState()
+
             orders = [self.orders[order_id] for order_id in self.batch.order_ids if order_id in self.orders]
             if len(orders) == 2:
-                # Re-query road geometry under the new network conditions. The route's
-                # geometry, ETA and savings are all refreshed rather than only its copy.
+                # Re-query the batch's street geometry using the central condition
+                # state. A sector penalty affects only candidates and legs that cross
+                # the affected corridor; torrential rain changes every route's ETA.
                 first, second = sorted(orders, key=lambda order: order.distance_km)
-                for order in orders:
-                    direct = await self.routing.estimate(tuple(order.origin), tuple(order.destination), traffic, weather)
-                    order.distance_km = round(direct.distance_km, 2)
-                    order.eta_minutes = round(direct.duration_minutes, 1)
-                    order.route_geometry = direct.geometry
-                    order.street_names = direct.street_names
-                    order.delivery_fee_mxn = round(39 + direct.distance_km * 8.5, 2)
-                leg_one = await self.routing.estimate(tuple(first.origin), tuple(first.destination), traffic, weather)
-                leg_two = await self.routing.estimate(tuple(first.destination), tuple(second.destination), traffic, weather)
+                leg_one, _ = await self._conditioned_route(first.origin, first.destination)
+                leg_two, _ = await self._conditioned_route(first.destination, second.destination)
                 geometry = list(leg_one.geometry)
                 if leg_two.geometry:
                     geometry.extend(leg_two.geometry[1:] if geometry else leg_two.geometry)
@@ -715,6 +772,7 @@ class LiveOrderCoordinator:
                 "TORRENTIAL_RAIN": "Lluvia torrencial: Rumbo recalculó la ruta y preservó el batch con prioridad de seguridad.",
                 "GONZALITOS_FLOOD": "Inundación en Gonzalitos: Rumbo evitó la zona afectada y recalculó la secuencia de entrega.",
                 "SAN_PEDRO_CONGESTION": "Congestionamiento en San Pedro: Rumbo recalculó ETA y mantuvo la ruta de menor costo.",
+                "NORMAL_TRAFFIC": "Tráfico normal: Rumbo restauró los ETA base de la red vial.",
             }
             self.batch.reasoning = f"{impacts.get(disruption, 'Rumbo Edge actualizó la recomendación con el nuevo estado vial.')} Ruta y ETA recalculados; {self.batch.savings_percent:.1f}% de ahorro calculado."
             self.batch.status = f"RECALCULATED_{disruption}"

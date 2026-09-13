@@ -30,9 +30,11 @@ class FallbackRouter:
         penalty = max(traffic.global_factor, 0.2)
         warnings: list[str] = ["offline fallback route"]
         if weather.rain_intensity > 0.3:
-            penalty *= 1 + weather.rain_intensity * 0.35
+            penalty *= 1 / .65 if weather.rain_intensity >= .8 else 1 + weather.rain_intensity * .35
             warnings.append("rain speed penalty")
-        if weather.flooding_risk > 0.4:
+        # Torrential rain already applies the mandated 35% fleet-speed reduction
+        # above. Avoid stacking a second generic flood penalty on that same event.
+        if weather.flooding_risk > 0.4 and weather.rain_intensity < .8:
             penalty *= 1 + weather.flooding_risk * 0.45
             warnings.append("flooding speed penalty")
         zone_closed = destination_zone and destination_zone in traffic.road_closures
@@ -44,4 +46,3 @@ class FallbackRouter:
             distance_km=round(distance, 3), duration_minutes=round(minutes, 2),
             geometry=[[origin[1], origin[0]], [destination[1], destination[0]]], warnings=warnings,
         )
-

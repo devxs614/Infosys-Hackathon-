@@ -1,6 +1,13 @@
+import asyncio
+
+import pytest
 from fastapi.testclient import TestClient
 
+from edge_server.agents.gemini_agent import GeminiAgent
+from edge_server.live_order_service import LiveOrderCoordinator
 from edge_server.main import create_app
+from edge_server.models import LiveOrder, TrafficState, WeatherState
+from edge_server.routing.routing_engine import RoutingEngine
 
 
 def _receive_until(socket, expected: str, limit: int = 30) -> dict:
@@ -130,3 +137,67 @@ def test_only_the_targeted_real_courier_can_accept_its_dispatched_order():
             assert match["driver"]["vehicle"] == "Bicicleta eléctrica"
             assert match["order"]["courier_route_geometry"]
             assert match["order"]["route_geometry"]
+
+
+def _live_coordinator() -> LiveOrderCoordinator:
+    return LiveOrderCoordinator(GeminiAgent(enabled=False), RoutingEngine("https://example.invalid", use_osrm=False))
+
+
+def test_weather_and_sector_costs_change_central_dispatch_choice_and_trace():
+    async def scenario():
+        coordinator = _live_coordinator()
+        coordinator.drivers = {
+            "carlos": {
+                "id": "carlos", "name": "Carlos", "online": True, "is_available": True,
+                "position": [25.6500, -100.3480], "assigned_order_ids": [],
+            },
+            "topo": {
+                "id": "topo", "name": "Topo", "online": True, "is_available": True,
+                "position": [25.6500, -100.4150], "assigned_order_ids": [],
+            },
+        }
+        coordinator.traffic = TrafficState(affected_zones=["San Pedro"], congestion_level="heavy")
+        coordinator.weather = WeatherState(rain_intensity=.95)
+        order = LiveOrder(
+            id="RUM-0001", client_id="client", client_name="Ana", restaurant="Centrito",
+            origin=[25.6500, -100.3800], destination=[25.6600, -100.3900],
+            location=[25.6600, -100.3900], items=[{"id": "meal"}],
+        )
+
+        selected = await coordinator._select_driver_with_trace(order.origin, [order])
+
+        assert selected["id"] == "topo"
+        assert coordinator.dispatch_log["weather_traffic_aware"] is True
+        candidates = {candidate["name"]: candidate for candidate in coordinator.dispatch_log["candidates"]}
+        assert "SAN_PEDRO_CONGESTION" in candidates["Carlos"]["penalty"]
+        assert "TORRENTIAL_RAIN" in candidates["Topo"]["penalty"]
+
+    asyncio.run(scenario())
+
+
+def test_torrential_rain_recalculates_eta_and_courier_progress_is_three_seconds_per_kilometre():
+    async def scenario():
+        coordinator = _live_coordinator()
+        origin, destination = [25.6500, -100.3800], [25.6600, -100.3900]
+        normal, _ = await coordinator._conditioned_route(origin, destination)
+        await coordinator.recalculate("TORRENTIAL_RAIN", TrafficState(), WeatherState(rain_intensity=.95, flooding_risk=.7))
+        rain, _ = await coordinator._conditioned_route(origin, destination)
+        assert rain.duration_minutes == pytest.approx(normal.duration_minutes / .65, abs=.02)
+
+        order = LiveOrder(
+            id="RUM-0002", client_id="client", origin=origin, destination=destination,
+            location=destination, items=[{"id": "meal"}], status="MATCHED", driver_id="topo",
+            courier_distance_km=2, courier_route_geometry=[[-100.3800, 25.6500], [-100.3900, 25.6600]],
+        )
+        coordinator.orders[order.id] = order
+        coordinator.drivers["topo"] = {
+            "id": "topo", "name": "Topo", "online": True, "is_available": True,
+            "position": origin, "assigned_order_ids": [order.id], "bearing": 0,
+        }
+
+        updates = await coordinator.advance(3)
+
+        assert updates[0]["phase"] == "COURIER_TO_STORE"
+        assert updates[0]["progress"] == .5
+
+    asyncio.run(scenario())

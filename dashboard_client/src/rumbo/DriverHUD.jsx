@@ -24,7 +24,7 @@ function CourierStartingPoint({ profile, connected, point, onPointChange, onGoOn
 
 function DispatchTrace({ trace }) {
   if (!trace?.candidates?.length) return null
-  return <GlassCard className="p-5"><p className="eyebrow">AI DECISION TRACE</p><div className="mt-4 space-y-2 text-xs">{trace.candidates.map((candidate) => <p key={candidate.driver_id} className={`rounded-xl border p-3 ${candidate.selected ? 'border-cyan/30 bg-cyan/10 text-cyan' : 'border-white/10 text-white/55'}`}>{candidate.name}: {candidate.distance_km} km · {candidate.eta_minutes} min {candidate.selected ? '→ SELECTED ✓' : '→ DISCARDED'}</p>)}</div><p className="mt-3 text-xs leading-5 text-white/50">{trace.reason}</p></GlassCard>
+  return <GlassCard className="p-5"><p className="eyebrow">AI DISPATCH DECISION - WEATHER/TRAFFIC AWARE</p><div className="mt-4 space-y-2 text-xs">{trace.candidates.map((candidate) => <p key={candidate.driver_id} className={`rounded-xl border p-3 ${candidate.selected ? 'border-cyan/30 bg-cyan/10 text-cyan' : 'border-white/10 text-white/55'}`}>{candidate.name}: {candidate.distance_km} km · {candidate.eta_minutes} min · {candidate.penalty ? `Penalty: ${candidate.penalty}` : 'Clear corridor'} {candidate.selected ? '→ SELECTED ✓' : '→ DISCARDED'}</p>)}</div><p className="mt-3 text-xs leading-5 text-white/50">{trace.reason}</p></GlassCard>
 }
 
 export function DriverHUD({ profile, live, notification, onDismiss, connected, send, onHome, onLogout }) {

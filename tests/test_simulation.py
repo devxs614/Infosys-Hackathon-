@@ -31,4 +31,10 @@ async def test_judge_event_updates_traffic_without_waiting_for_a_simulation_tick
     await engine.trigger(JudgeEvent(event_type=EventType.SAN_PEDRO_CONGESTION))
     state = engine.state()
     assert state.traffic.congestion_level == "heavy"
-    assert state.traffic.global_factor >= 1.55
+    assert "San Pedro" in state.traffic.affected_zones
+    assert state.traffic.global_factor == 1
+
+    await engine.trigger(JudgeEvent(event_type=EventType.NORMAL_TRAFFIC))
+    state = engine.state()
+    assert state.traffic.congestion_level == "normal"
+    assert state.weather.rain_intensity == 0

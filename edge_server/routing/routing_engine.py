@@ -19,6 +19,7 @@ class RoutingEngine:
         if self.use_osrm:
             result = await self.osrm.route(origin, destination)
             if result is not None:
-                result.duration_minutes = round(result.duration_minutes * traffic.global_factor * (1 + weather.rain_intensity * .25), 2)
+                rain_factor = 1 / .65 if weather.rain_intensity >= .8 else 1 + weather.rain_intensity * .25
+                result.duration_minutes = round(result.duration_minutes * traffic.global_factor * rain_factor, 2)
                 return result
         return self.fallback.estimate(origin, destination, traffic, weather, destination_zone)

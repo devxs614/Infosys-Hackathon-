@@ -66,10 +66,16 @@ function usePolylineDriver(driver, line) {
     }
     const target = Math.min(1, Math.max(0, driver.progress))
     const from = target < lastProgress.current ? 0 : lastProgress.current
-    const startedAt = performance.now()
+    let previousFrame = performance.now()
+    let elapsed = 0
     let frame = 0
     const animate = (now) => {
-      const ratio = Math.min(1, (now - startedAt) / 470)
+      // Delta-time keeps display interpolation stable at any frame rate. The
+      // server owns the route physics (exactly 3 seconds per kilometre) and
+      // sends a fresh progress snapshot every 500 ms.
+      elapsed += now - previousFrame
+      previousFrame = now
+      const ratio = Math.min(1, elapsed / 500)
       const routePoint = pointAtProgress(line, from + (target - from) * ratio)
       const next = { ...driver, ...routePoint }
       setMoving(next)
@@ -78,7 +84,7 @@ function usePolylineDriver(driver, line) {
     }
     frame = requestAnimationFrame(animate)
     return () => cancelAnimationFrame(frame)
-  }, [driver?.timestamp, driver?.progress, driver?.position?.[0], driver?.position?.[1], line])
+  }, [driver?.timestamp, driver?.updated_at, driver?.phase, line])
   return moving || driver || null
 }
 
