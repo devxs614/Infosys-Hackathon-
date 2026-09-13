@@ -13,4 +13,5 @@ node_modules.pre-rumbo/
 package-lock.json
 dist/
 *.log
+edge_server/data/*.sqlite3
 .DS_Store

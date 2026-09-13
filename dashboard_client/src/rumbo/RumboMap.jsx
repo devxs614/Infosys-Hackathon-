@@ -128,7 +128,7 @@ export function RumboMap({
       </>}
       {originPoint && <Marker position={originPoint} icon={icon('pickup')}><Tooltip direction="top" offset={[0, -12]}>{origin?.name || 'Origen · Rumbo Kitchen'}</Tooltip></Marker>}
       {destinationPoint && <Marker position={destinationPoint} icon={icon('destination')} draggable={interactive} eventHandlers={{ dragend: (event) => { const point = event.target.getLatLng(); onDestinationChange?.([point.lat, point.lng]) } }}><Tooltip direction="top" offset={[0, -12]} permanent={interactive}>{destination?.name || 'Entrega'}</Tooltip></Marker>}
-      {movingDriver?.position && <Marker position={movingDriver.position} icon={icon('driver', movingDriver.bearing)}><Tooltip direction="top" offset={[0, -12]}>{movingDriver.name || 'Courier Rumbo'} · {movingDriver.street_name || 'En ruta'}</Tooltip></Marker>}
+      {movingDriver?.position && <Marker position={movingDriver.position} icon={icon('driver', movingDriver.bearing)}><Tooltip direction="top" offset={[0, -12]}>{movingDriver.name}{movingDriver.street_name ? ` · ${movingDriver.street_name}` : ''}</Tooltip></Marker>}
       {orderPoints.map((point, index) => <CircleMarker key={`${point.join('-')}-${index}`} center={point} radius={6} pathOptions={{ color: '#22d3ee', fillColor: '#06b6d4', fillOpacity: .7 }} />)}
     </MapContainer>
     <div className="pointer-events-none absolute bottom-4 left-4 z-[500] rounded-xl border border-white/10 bg-black/55 px-3 py-2 text-[9px] font-semibold tracking-[.16em] text-cyan/90 backdrop-blur">{courierLine.length > 1 ? 'ÁMBAR · COURIER → TIENDA  ·  VIOLETA · TIENDA → CLIENTE' : 'MONTERREY · LIVE STREET GRAPH'}</div>

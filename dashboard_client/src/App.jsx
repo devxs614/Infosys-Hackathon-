@@ -38,6 +38,7 @@ const englishCopy = [
   ['Simulación activa', 'Simulation active'], ['Iniciar demo', 'Start demo'], ['La operación completa,', 'The entire operation,'], ['en una sola superficie.', 'on one surface.'], ['Usuarios y couriers entran desde cualquier laptop. El Edge node calcula rutas, pagos, batches y telemetría desde la Raspberry Pi.', 'Users and couriers join from any laptop. The Edge node calculates routes, payments, batches, and telemetry on the Raspberry Pi.'], ['Esperando pedidos desde la red', 'Waiting for orders from the network'], ['PEDIDOS LIVE', 'LIVE ORDERS'], ['GANANCIAS AI', 'AI EARNINGS'], ['MEJORA IA', 'AI IMPROVEMENT'], ['REPARTIDORES ACTIVOS', 'ACTIVE COURIERS'], ['La flota en vivo', 'Live fleet'], ['ESTADO', 'STATUS'], ['ENTREGAS', 'DELIVERIES'], ['GANANCIAS', 'EARNINGS'], ['Esperando repartidores registrados.', 'Waiting for registered couriers.'], ['Flujo de valor', 'Value flow'], ['INGRESOS TOTALES PLATAFORMA', 'TOTAL PLATFORM REVENUE'], ['Comisión retenida', 'Commission retained'], ['PAGO TOTAL A REPARTIDORES', 'TOTAL COURIER PAYOUT'], ['TRÁFICO', 'TRAFFIC'], ['CLIMA', 'WEATHER'], ['MINUTO SIM.', 'SIM. MINUTE'], ['SIMULADOR PARA JUECES', 'JUDGE SIMULATOR'], ['Eventos que cambian la decisión Edge', 'Events that change the Edge decision'], ['Lluvia torrencial', 'Torrential rain'], ['Inundación Gonzalitos', 'Gonzalitos flooding'], ['Congestionamiento San Pedro', 'San Pedro congestion'],
   ['Buscando courier', 'Finding courier'], ['Courier asignado', 'Courier assigned'], ['En ruta', 'On route'], ['Entregado', 'Delivered'], ['Origen · Rumbo Kitchen', 'Origin · Rumbo Kitchen'], ['Entrega', 'Delivery'], ['ÁMBAR · COURIER → TIENDA  ·  VIOLETA · TIENDA → CLIENTE', 'AMBER · COURIER → STORE  ·  VIOLET · STORE → CUSTOMER'],
   ['Nuevo pedido asignado', 'New order assigned'], ['Pedido cancelado por el cliente', 'Order cancelled by customer'], ['Rumbo AI detectó un batch', 'Rumbo AI detected a batch'], ['Rumbo Edge espera pedidos cercanos para evaluar un batching real.', 'Rumbo Edge is waiting for nearby orders to evaluate a real batch.'], ['Rumbo Edge agrupó los destinos cercanos de', 'Rumbo Edge grouped the nearby destinations of'], ['Ahorro calculado:', 'Calculated saving:'], ['✅ DECISIÓN OPTIMAL:', '✅ OPTIMAL DECISION:'], ['El Batching incrementó la ganancia proyectada del courier un', 'Batching increased the courier’s projected earnings by'], ['y redujo', 'and reduced'], ['min de operación.', 'minutes of operation.'], ['Rumbo Edge reportó un error.', 'Rumbo Edge reported an error.'],
+  ['No hay repartidores disponibles en este momento', 'No couriers are available right now'], ['La dirección de entrega excede el límite operativo de 20 km', 'The delivery address exceeds the 20 km operating limit'],
 ]
 
 function toEnglish(value) {
@@ -93,7 +94,18 @@ export default function App() {
   const socket = useWebSocket(liveState.onMessage)
   const [profile, setProfile] = useState(readSession)
   useEffect(() => {
-    if (socket.status === 'connected' && profile) socket.send({ type: 'REGISTER_USER', data: profile })
+    if (socket.status !== 'connected' || !profile?.session_token) return undefined
+    const announce = (location) => socket.send({ type: 'REGISTER_USER', data: { user_id: profile.id, session_token: profile.session_token, location } })
+    if (profile.role !== 'driver' || !navigator.geolocation) {
+      announce(null)
+      return undefined
+    }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => announce([coords.latitude, coords.longitude]),
+      () => announce(null),
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 },
+    )
+    return undefined
   }, [socket.status, profile])
   const authenticate = (nextProfile) => {
     window.localStorage.setItem(sessionKey, JSON.stringify(nextProfile))

@@ -186,13 +186,15 @@ class SocketMessage(BaseModel):
 
 
 class UserRegistration(BaseModel):
-    """A browser-local identity announced to the Edge node, never a credential store."""
+    """A centrally authenticated identity announced to the Edge node."""
 
     id: str = Field(min_length=3, max_length=100)
     name: str = Field(min_length=2, max_length=120)
     email: str = Field(min_length=3, max_length=254)
     role: Literal["client", "driver", "admin"]
     location: list[float] | None = None
+    vehicle: str | None = Field(default=None, max_length=120)
+    avatar_url: str | None = Field(default=None, max_length=500)
 
     @field_validator("location")
     @classmethod
@@ -200,6 +202,20 @@ class UserRegistration(BaseModel):
         if value is not None:
             validate_monterrey_coordinates(value)
         return value
+
+
+class AuthRegisterRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=3, max_length=256)
+    role: Literal["client", "driver", "admin"]
+    vehicle: str | None = Field(default=None, max_length=120)
+    avatar_url: str | None = Field(default=None, max_length=500)
+
+
+class AuthLoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=3, max_length=256)
 
 
 def validate_monterrey_coordinates(value: list[float]) -> list[float]:

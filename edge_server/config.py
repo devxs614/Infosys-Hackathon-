@@ -33,6 +33,7 @@ class Settings:
     gemini_api_key: str = ""
     gemini_model: str = "auto"
     tiger_db_url: str = ""
+    auth_db_path: str = "edge_server/data/rumbo_auth.sqlite3"
     osrm_url: str = "https://router.project-osrm.org"
     shift_minutes: int = 240
     demo_seconds: int = 180
@@ -52,6 +53,7 @@ def get_settings() -> Settings:
         app_env=os.getenv("APP_ENV", "development"), host=os.getenv("HOST", "0.0.0.0"),
         port=_int("PORT", 8000), gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "auto").strip() or "auto", tiger_db_url=os.getenv("TIGER_DB_URL", ""),
+        auth_db_path=os.getenv("AUTH_DB_PATH", "edge_server/data/rumbo_auth.sqlite3").strip() or "edge_server/data/rumbo_auth.sqlite3",
         osrm_url=os.getenv("OSRM_URL", "https://router.project-osrm.org").rstrip("/"),
         shift_minutes=_int("SHIFT_MINUTES", 240), demo_seconds=_int("DEMO_SECONDS", 180),
         tick_ms=_int("TICK_MS", 500), use_osrm=_bool("USE_OSRM", True),

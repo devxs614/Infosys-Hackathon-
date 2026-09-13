@@ -3,7 +3,7 @@ import { demoApi } from '../services/api'
 
 export function useRumboLive() {
   const [simulation, setSimulation] = useState(null)
-  const [live, setLive] = useState({ users: [], drivers: [], orders: [], batches: [], batch: null, telemetry: {}, metrics: {}, financials: { platform: {}, drivers: [] }, verdict: null, orderMatches: {} })
+  const [live, setLive] = useState({ users: [], drivers: [], orders: [], batches: [], batch: null, telemetry: {}, metrics: {}, financials: { platform: {}, drivers: [] }, verdict: null, orderMatches: {}, noDriverOrders: {} })
   const [notification, setNotification] = useState(null)
   const [driverNotifications, setDriverNotifications] = useState({})
   const [error, setError] = useState('')
@@ -11,7 +11,7 @@ export function useRumboLive() {
     const data = message.data || {}
     if (message.type === 'hello_response') setSimulation(data.state || null)
     if (message.type === 'simulation_state') setSimulation(data)
-    if (message.type === 'live_order_state' || message.type === 'LIVE_ORDER_STATE') setLive((current) => ({ ...current, ...data, orderMatches: current.orderMatches || {} }))
+    if (message.type === 'live_order_state' || message.type === 'LIVE_ORDER_STATE') setLive((current) => ({ ...current, ...data, orderMatches: current.orderMatches || {}, noDriverOrders: current.noDriverOrders || {} }))
     if (message.type === 'NEW_ORDER') setLive((current) => ({ ...current, orders: [...current.orders.filter((order) => order.id !== data.order?.id), data.order] }))
     if (message.type === 'AI_BATCH_SUGGESTION' || message.type === 'AI_BATCH_OPTIMIZATION') setLive((current) => ({ ...current, batch: data, batches: [...(current.batches || []).filter((batch) => batch.id !== data.id), data] }))
     if (message.type === 'DRIVER_NOTIFICATION') {
@@ -25,8 +25,14 @@ export function useRumboLive() {
       orders: [...(current.orders || []).filter((order) => order.id !== data.order?.id), data.order],
       drivers: [...(current.drivers || []).filter((driver) => driver.id !== data.driver?.id), data.driver],
       orderMatches: { ...(current.orderMatches || {}), [data.order?.id]: data },
+      noDriverOrders: Object.fromEntries(Object.entries(current.noDriverOrders || {}).filter(([orderId]) => orderId !== data.order?.id)),
       financials: data.financials ? { ...current.financials, drivers: [...(current.financials?.drivers || []).filter((financial) => financial.driver_id !== data.financials.driver_id), data.financials] } : current.financials,
     }))
+    if (message.type === 'ORDER_DISPATCHED') {
+      setLive((current) => ({ ...current, orders: [...(current.orders || []).filter((order) => order.id !== data.order?.id), data.order], noDriverOrders: Object.fromEntries(Object.entries(current.noDriverOrders || {}).filter(([orderId]) => orderId !== data.order?.id)) }))
+      setDriverNotifications((current) => ({ ...current, [data.driver?.id]: { ...data, title: 'New order dispatched', message: `${data.order?.restaurant || ''} → ${data.order?.destination_label || ''}` } }))
+    }
+    if (message.type === 'NO_DRIVERS_AVAILABLE') setLive((current) => ({ ...current, noDriverOrders: { ...(current.noDriverOrders || {}), [data.order?.id]: data } }))
     if (message.type === 'DRIVER_FINANCIAL_UPDATE') setLive((current) => ({
       ...current,
       financials: {
@@ -42,6 +48,7 @@ export function useRumboLive() {
     }))
     if (message.type === 'USER_REGISTERED') setLive((current) => ({ ...current, users: [...(current.users || []).filter((user) => user.id !== data.user?.id), data.user], metrics: data.metrics || current.metrics }))
     if (message.type === 'DRIVER_ONLINE') setLive((current) => ({ ...current, drivers: [...(current.drivers || []).filter((driver) => driver.id !== data.driver?.id), data.driver], metrics: data.metrics || current.metrics }))
+    if (message.type === 'DRIVER_OFFLINE') setLive((current) => ({ ...current, drivers: (current.drivers || []).filter((driver) => driver.id !== data.driver?.id), metrics: data.metrics || current.metrics }))
     if (message.type === 'DRIVER_TELEMETRY') setLive((current) => ({ ...current, telemetry: { ...(current.telemetry || {}), [data.driver_id]: data } }))
     if (message.type === 'LIVE_METRICS') setLive((current) => ({ ...current, metrics: data }))
     if (message.type === 'error') setError(data.message || 'Rumbo Edge reportó un error.')

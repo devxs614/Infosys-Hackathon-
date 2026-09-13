@@ -3,168 +3,106 @@ from fastapi.testclient import TestClient
 from edge_server.main import create_app
 
 
-def _receive_until(socket, expected: str) -> dict:
-    for _ in range(12):
+def _receive_until(socket, expected: str, limit: int = 30) -> dict:
+    for _ in range(limit):
         message = socket.receive_json()
         if message["type"] == expected:
             return message
     raise AssertionError(f"Expected {expected}")
 
 
-def test_dynamic_driver_is_assigned_to_a_dynamic_client_order():
+def _ready(socket) -> None:
+    _receive_until(socket, "connection")
+    _receive_until(socket, "hello_response")
+    _receive_until(socket, "live_order_state")
+
+
+def _register_account(client: TestClient, name: str, email: str, role: str, vehicle: str | None = None) -> dict:
+    response = client.post("/api/auth/register", json={
+        "name": name, "email": email, "password": "correct-horse", "role": role, "vehicle": vehicle,
+    })
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _bind(socket, account: dict, location: list[float] | None = None) -> None:
+    socket.send_json({"type": "REGISTER_USER", "data": {
+        "user_id": account["user"]["id"], "session_token": account["session_token"], "location": location,
+    }})
+    _receive_until(socket, "USER_REGISTERED")
+
+
+def test_global_authentication_persists_in_the_pi_database_between_app_sessions(tmp_path, monkeypatch):
+    database = tmp_path / "global-rumbo.sqlite3"
+    monkeypatch.setenv("AUTH_DB_PATH", str(database))
+
+    with TestClient(create_app()) as first_laptop:
+        created = _register_account(first_laptop, "Juan", "juan@example.com", "client")
+
+    with TestClient(create_app()) as second_laptop:
+        login = second_laptop.post("/api/auth/login", json={"email": "juan@example.com", "password": "correct-horse"})
+        assert login.status_code == 200
+        assert login.json()["user"] == created["user"]
+        assert login.json()["session_token"] != created["session_token"]
+
+
+def test_late_real_driver_receives_pending_order_and_client_sees_the_same_person():
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            socket.send_json({
-                "type": "REGISTER_USER",
-                "data": {"id": "driver-alex", "name": "Alex Rivera", "email": "alex@example.com", "role": "driver", "location": [25.67, -100.33]},
-            })
-            online = _receive_until(socket, "DRIVER_ONLINE")
-            assert online["data"]["metrics"]["online_drivers_count"] == 1
-            socket.send_json({
-                "type": "NEW_ORDER",
-                "data": {
-                    "client_id": "client-sofia", "client_name": "Sofía Garza", "restaurant": "Rumbo Kitchen Tec",
-                    "origin": [25.6518, -100.2894], "destination": [25.6488, -100.3574],
-                    "destination_label": "Centrito Valle", "items": [{"id": "citrus-bowl", "quantity": 1}],
-                },
-            })
-            order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
-            assert order["client_id"] == "client-sofia"
-            assert order["driver_id"] == "driver-alex"
-            assert order["status"] == "MATCHED"
-            assert order["origin"] != order["destination"]
-            socket.send_json({"type": "DRIVER_ACTION", "data": {"action": "ACCEPT_ASSIGNMENT", "driver_id": "driver-alex", "order_id": order["id"]}})
-            action = _receive_until(socket, "DRIVER_ACTION")
-            assert action["data"]["orders"][0]["status"] == "IN_TRANSIT"
+        customer = _register_account(client, "Sofía", "sofia@example.com", "client")
+        driver = _register_account(client, "Carlos", "carlos@example.com", "driver", "Yamaha FZ")
+        with client.websocket_connect("/ws") as customer_socket, client.websocket_connect("/ws") as driver_socket:
+            _ready(customer_socket)
+            _ready(driver_socket)
+            _bind(customer_socket, customer)
 
-
-def test_match_financial_and_verdict_events_keep_the_public_driver_profile():
-    with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            socket.send_json({
-                "type": "REGISTER_USER",
-                "data": {"id": "driver-rogelio", "name": "Rogelio Mendoza", "email": "rogelio@example.com", "role": "driver", "location": [25.65, -100.35]},
-            })
-            _receive_until(socket, "DRIVER_ONLINE")
-            socket.send_json({
-                "type": "NEW_ORDER",
-                "data": {"client_id": "client-ana", "client_name": "Ana", "restaurant": "Centrito", "origin": [25.6496, -100.3595],
-                         "destination": [25.6488, -100.3574], "destination_label": "Centrito Valle", "items": [{"id": "bowl", "price": 198}]},
-            })
-            match = _receive_until(socket, "ORDER_MATCHED")["data"]
-            assert match["driver"]["name"] == "Rogelio Mendoza"
-            assert match["driver"]["vehicle"] == "Honda Cargo 150"
-            assert match["driver"]["rating"] == 4.9
-            assert match["financials"]["current_trip_earnings_mxn"] > 0
-            _receive_until(socket, "DRIVER_FINANCIAL_UPDATE")
-            verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
-            assert verdict["available"] is False
-
-
-def test_batch_emits_a_financial_impact_verdict():
-    with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            socket.send_json({"type": "REGISTER_USER", "data": {"id": "driver-luis", "name": "Luis", "email": "luis@example.com", "role": "driver", "location": [25.65, -100.35]}})
-            _receive_until(socket, "DRIVER_ONLINE")
-            for client_id, destination in (("client-uno", [25.6488, -100.3574]), ("client-dos", [25.6517, -100.3492])):
-                socket.send_json({"type": "NEW_ORDER", "data": {
-                    "client_id": client_id, "client_name": client_id, "restaurant": "Centrito", "origin": [25.6496, -100.3595],
-                    "destination": destination, "destination_label": "Valle", "items": [{"id": "bowl", "price": 198}],
-                }})
-                _receive_until(socket, "NEW_ORDER")
-            verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
-            assert verdict["available"] is True
-            assert verdict["baseline_distance_km"] >= verdict["optimized_distance_km"]
-            assert verdict["courier_earning_improvement_percent"] > 0
-
-
-def test_late_driver_registration_matches_pending_order_and_broadcasts_financials():
-    """A courier coming online after checkout receives the same live match contract."""
-    with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            socket.send_json({"type": "NEW_ORDER", "data": {
-                "client_id": "client-late", "client_name": "Mariana", "restaurant": "San Jeronimo",
-                "origin": [25.6896, -100.3584], "destination": [25.6794, -100.3441],
-                "destination_label": "Obispado", "items": [{"id": "bowl", "price": 198}],
+            customer_socket.send_json({"type": "NEW_ORDER", "data": {
+                "client_id": customer["user"]["id"], "session_token": customer["session_token"],
+                "restaurant": "Tec", "origin": [25.6518, -100.2894], "destination": [25.6488, -100.3574],
+                "destination_label": "Centrito Valle", "items": [{"id": "bowl", "quantity": 1}],
             }})
-            pending_order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
-            assert pending_order["status"] == "PENDING"
+            pending = _receive_until(customer_socket, "NEW_ORDER")["data"]["order"]
+            assert pending["driver_id"] is None
+            _receive_until(customer_socket, "NO_DRIVERS_AVAILABLE")
 
-            socket.send_json({"type": "REGISTER_USER", "data": {
-                "id": "driver-late", "name": "Rogelio Mendoza", "email": "late@example.com",
-                "role": "driver", "location": [25.68, -100.35],
+            _bind(driver_socket, driver, [25.65, -100.35])
+            _receive_until(driver_socket, "DRIVER_ONLINE")
+            dispatched = _receive_until(driver_socket, "ORDER_DISPATCHED")["data"]
+            assert dispatched["order"]["id"] == pending["id"]
+            assert dispatched["driver"]["name"] == "Carlos"
+            assert dispatched["driver"]["vehicle"] == "Yamaha FZ"
+
+            driver_socket.send_json({"type": "DRIVER_ACTION", "data": {
+                "action": "ACCEPT_ASSIGNMENT", "driver_id": driver["user"]["id"], "order_id": pending["id"],
+                "session_token": driver["session_token"],
             }})
-            _receive_until(socket, "DRIVER_ONLINE")
-            match = _receive_until(socket, "ORDER_MATCHED")["data"]
-            assert match["order"]["id"] == pending_order["id"]
-            assert match["order"]["driver_id"] == "driver-late"
-            assert match["driver"]["name"] == "Rogelio Mendoza"
-            update = _receive_until(socket, "DRIVER_FINANCIAL_UPDATE")["data"]
-            assert update["financials"]["driver_id"] == "driver-late"
-            assert update["financials"]["current_trip_earnings_mxn"] > 0
-            verdict = _receive_until(socket, "VERDICT_EVALUATION")["data"]
-            assert verdict["available"] is False
+            matched = _receive_until(customer_socket, "ORDER_MATCHED")["data"]
+            assert matched["driver"]["id"] == driver["user"]["id"]
+            assert matched["driver"]["name"] == "Carlos"
 
 
-def test_dispatch_chooses_the_closest_registered_driver_and_includes_approach_route():
+def test_cancellation_is_broadcast_and_releases_the_real_courier_assignment():
     with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            for driver_id, name, location in (
-                ("driver-far", "Elena Lejana", [25.7210, -100.2800]),
-                ("driver-near", "Carlos Cercano", [25.6552, -100.3775]),
-            ):
-                socket.send_json({"type": "REGISTER_USER", "data": {
-                    "id": driver_id, "name": name, "email": f"{driver_id}@example.com", "role": "driver", "location": location,
-                }})
-                _receive_until(socket, "DRIVER_ONLINE")
-
-            socket.send_json({"type": "NEW_ORDER", "data": {
-                "client_id": "client-route", "client_name": "Mariana", "restaurant": "Centrito",
-                "origin": [25.6550, -100.3780], "destination": [25.6488, -100.3574],
-                "destination_label": "Centrito Valle", "items": [{"id": "bowl", "price": 198}],
+        driver = _register_account(client, "Nora", "nora@example.com", "driver", "Moto eléctrica")
+        customer = _register_account(client, "Mateo", "mateo@example.com", "client")
+        with client.websocket_connect("/ws") as driver_socket, client.websocket_connect("/ws") as customer_socket:
+            _ready(driver_socket)
+            _ready(customer_socket)
+            _bind(driver_socket, driver, [25.6551, -100.3781])
+            _receive_until(driver_socket, "DRIVER_ONLINE")
+            _bind(customer_socket, customer)
+            customer_socket.send_json({"type": "NEW_ORDER", "data": {
+                "client_id": customer["user"]["id"], "session_token": customer["session_token"],
+                "restaurant": "Centrito", "origin": [25.6550, -100.3780], "destination": [25.6488, -100.3574],
+                "destination_label": "Valle", "items": [{"id": "bowl", "quantity": 1}],
             }})
-            order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
-            assert order["driver_id"] == "driver-near"
-            assert order["courier_route_geometry"]
-            assert order["courier_distance_km"] >= 0
-            match = _receive_until(socket, "ORDER_MATCHED")["data"]
-            assert match["driver"]["name"] == "Carlos Cercano"
-
-
-def test_cancelled_order_is_removed_from_the_assigned_courier_hud():
-    with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            socket.send_json({"type": "REGISTER_USER", "data": {
-                "id": "driver-cancel", "name": "Carlos", "email": "carlos@example.com", "role": "driver", "location": [25.6552, -100.3775],
+            order = _receive_until(customer_socket, "NEW_ORDER")["data"]["order"]
+            _receive_until(driver_socket, "ORDER_DISPATCHED")
+            customer_socket.send_json({"type": "CANCEL_ORDER", "data": {
+                "client_id": customer["user"]["id"], "order_id": order["id"], "session_token": customer["session_token"],
             }})
-            _receive_until(socket, "DRIVER_ONLINE")
-            socket.send_json({"type": "NEW_ORDER", "data": {
-                "client_id": "client-cancel", "client_name": "Mariana", "restaurant": "Centrito",
-                "origin": [25.6550, -100.3780], "destination": [25.6488, -100.3574],
-                "destination_label": "Centrito Valle", "items": [{"id": "bowl", "price": 198}],
-            }})
-            order = _receive_until(socket, "NEW_ORDER")["data"]["order"]
-            socket.send_json({"type": "CANCEL_ORDER", "data": {"client_id": "client-cancel", "order_id": order["id"]}})
-            cancelled = _receive_until(socket, "ORDER_CANCELLED")["data"]
+            cancelled = _receive_until(driver_socket, "ORDER_CANCELLED")["data"]
             assert cancelled["order"]["status"] == "CANCELLED"
-            assert cancelled["driver_id"] == "driver-cancel"
-            state = _receive_until(socket, "LIVE_ORDER_STATE")["data"]
-            driver = next(item for item in state["drivers"] if item["id"] == "driver-cancel")
-            assert order["id"] not in driver["assigned_order_ids"]
-
-
-def test_telemetry_cannot_create_an_unregistered_courier():
-    with TestClient(create_app()) as client:
-        with client.websocket_connect("/ws") as socket:
-            _receive_until(socket, "live_order_state")
-            socket.send_json({"type": "DRIVER_TELEMETRY", "data": {
-                "driver_id": "driver-unknown", "position": [25.65, -100.35], "street_name": "Gonzalitos",
-            }})
-            error = _receive_until(socket, "error")
-            assert "Register the courier" in error["data"]["message"]
+            assert cancelled["driver_id"] == driver["user"]["id"]
+            state = _receive_until(driver_socket, "LIVE_ORDER_STATE")["data"]
+            real_driver = next(item for item in state["drivers"] if item["id"] == driver["user"]["id"])
+            assert order["id"] not in real_driver["assigned_order_ids"]

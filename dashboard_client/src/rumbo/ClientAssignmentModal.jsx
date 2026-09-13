@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { CheckCircle2, Clock3, Sparkles, Star, X } from 'lucide-react'
+import { CheckCircle2, Clock3, Sparkles, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 /** Client-only acknowledgement shown when ORDER_MATCHED arrives from the Pi. */
@@ -27,7 +27,7 @@ export function ClientAssignmentModal({ assignment }) {
         <p className="mt-3 text-sm leading-6 text-white/55">Tu pedido ya tiene una ruta optimizada y un courier confirmado.</p>
         <div className="mt-6 flex items-center gap-4 rounded-3xl border border-white/10 bg-white/[.055] p-4">
           {driver.avatar_url ? <img src={driver.avatar_url} alt="" className="h-14 w-14 rounded-2xl object-cover" /> : <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-violet to-cyan text-lg font-semibold">{driver.name?.slice(0, 1)}</div>}
-          <div className="min-w-0 flex-1"><p className="truncate font-semibold">{driver.name}</p><p className="mt-1 text-xs text-white/55">{driver.vehicle || 'Honda Cargo 150'} · <span className="inline-flex items-center gap-1 text-amber-200"><Star size={12} fill="currentColor" />{driver.rating || 4.9}</span></p></div>
+          <div className="min-w-0 flex-1"><p className="truncate font-semibold">{driver.name}</p>{driver.vehicle && <p className="mt-1 text-xs text-white/55">{driver.vehicle}</p>}</div>
           <div className="text-right"><Clock3 className="ml-auto text-cyan" size={17} /><p className="mt-1 text-lg font-semibold text-cyan">{eta} min</p></div>
         </div>
         <div className="mt-5 flex items-center gap-2 text-xs text-violet-200"><Sparkles size={15} />Sincronizado con la Raspberry Pi en tiempo real.</div>

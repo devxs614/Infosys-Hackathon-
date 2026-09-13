@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from edge_server.api import demo, health, routes, websocket
+from edge_server.api import auth, demo, health, routes, websocket
 from edge_server.config import get_settings
+from edge_server.data.auth_store import AuthStore
 from edge_server.data.telemetry_service import TelemetryService
 from edge_server.data.tiger_db import TigerDB
 from edge_server.logging_config import configure_logging
@@ -26,6 +27,8 @@ def create_app() -> FastAPI:
         configure_logging()
         app.state.settings = settings
         app.state.connections = ConnectionManager()
+        app.state.auth_store = AuthStore(settings.auth_db_path)
+        app.state.auth_store.connect()
         telemetry = TelemetryService(TigerDB(settings.tiger_db_url, settings.use_tiger))
         await telemetry.start()
         app.state.engine = SimulationEngine(settings, telemetry, app.state.connections.broadcast)
@@ -50,6 +53,7 @@ def create_app() -> FastAPI:
             await telemetry_task
         await app.state.engine.stop()
         await telemetry.close()
+        app.state.auth_store.close()
 
     app = FastAPI(title="Rumbo | Edge Logistics OS", version="0.2.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
@@ -59,6 +63,7 @@ def create_app() -> FastAPI:
         return {"service": "Rumbo | Edge Logistics OS", "docs": "/docs", "health": "/health", "websocket": "/ws"}
 
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(demo.router)
     app.include_router(routes.router)
     app.include_router(websocket.router)

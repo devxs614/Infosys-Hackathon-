@@ -1,10 +1,4 @@
-"""Dynamic, in-memory dispatch mesh for the Rumbo live demo.
-
-The coordinator deliberately owns no credentials. Browser sessions are local and this
-service only receives public display profiles, orders and driver telemetry. That keeps
-the Raspberry Pi deployable without a cloud identity dependency while allowing any
-number of tabs or laptops to participate.
-"""
+"""Central live dispatch state for authenticated Rumbo clients and couriers."""
 from __future__ import annotations
 
 import asyncio
@@ -16,12 +10,10 @@ from edge_server.agents.gemini_agent import GeminiAgent
 from edge_server.models import (
     BatchPlan,
     DriverActionRequest,
-    DriverState,
     DriverTelemetryRequest,
     LiveOrder,
     LiveOrderRequest,
     OrderCancellationRequest,
-    Order,
     TrafficState,
     UserRegistration,
     WeatherState,
@@ -29,9 +21,8 @@ from edge_server.models import (
 from edge_server.routing.fallback_router import haversine_km
 from edge_server.routing.routing_engine import RoutingEngine
 
-PICKUP = [25.6550, -100.3780]
-MONTERREY_CENTER = [25.6866, -100.3161]
 TIME_WARP = 120
+MAX_DELIVERY_RADIUS_KM = 20.0
 BASE_COURIER_PAYOUT_MXN = 35.0
 COURIER_PAYOUT_PER_KM = 7.25
 BATCH_COURIER_BONUS_RATE = .12
@@ -80,20 +71,20 @@ class LiveOrderCoordinator:
         }
 
     @staticmethod
-    def _public_driver(driver: dict, status: str = "EN ESPERA") -> dict:
+    def _public_driver(driver: dict, status: str = "OFFLINE") -> dict:
         """Return only dashboard-safe profile and operational data for a courier."""
         return {
             "id": driver["id"],
             "name": driver["name"],
             "online": driver["online"],
-            "position": driver.get("position", MONTERREY_CENTER),
+            "is_available": bool(driver.get("is_available") and driver["online"]),
+            "position": driver.get("position"),
             "bearing": driver.get("bearing", 0),
             "speed_kmh": driver.get("speed_kmh", 0),
-            "street_name": driver.get("street_name", "Monterrey"),
+            "street_name": driver.get("street_name"),
             "assigned_order_ids": driver.get("assigned_order_ids", []),
-            "vehicle": driver.get("vehicle", "Honda Cargo 150"),
-            "rating": driver.get("rating", 4.9),
-            "avatar_url": driver.get("avatar_url", ""),
+            "vehicle": driver.get("vehicle"),
+            "avatar_url": driver.get("avatar_url"),
             "status": status,
             "updated_at": driver.get("updated_at"),
         }
@@ -105,7 +96,7 @@ class LiveOrderCoordinator:
                     "completed_deliveries": 0, "batch_time_saved_minutes": 0, "batch_savings_percent": 0}
         assigned = [order for order in self.orders.values() if order.driver_id == driver_id]
         completed = [order for order in assigned if order.status == "DELIVERED"]
-        active = [order for order in assigned if order.status != "DELIVERED"]
+        active = [order for order in assigned if order.status not in {"DELIVERED", "CANCELLED"}]
         driver_batches = [batch for batch in self.batches.values() if batch.driver_id == driver_id]
         time_saved = sum(max(0, batch.baseline_duration_minutes - batch.optimized_duration_minutes) for batch in driver_batches)
         savings = max((batch.savings_percent for batch in driver_batches), default=0)
@@ -155,11 +146,19 @@ class LiveOrderCoordinator:
         }
 
     def order_match_payload(self, order: LiveOrder) -> dict | None:
-        if not order.driver_id or order.driver_id not in self.drivers:
+        if order.status not in {"MATCHED", "IN_TRANSIT"} or not order.driver_id or order.driver_id not in self.drivers:
             return None
-        status = "EN TRÁNSITO" if order.status == "IN_TRANSIT" else "ASIGNADO"
+        status = order.status
         return {"order": order.model_dump(mode="json"), "driver": self._public_driver(self.drivers[order.driver_id], status),
                 "financials": self._driver_financials(order.driver_id)}
+
+    def order_dispatch_payload(self, order: LiveOrder) -> dict | None:
+        if order.status != "PENDING" or not order.driver_id or order.driver_id not in self.drivers:
+            return None
+        driver = self.drivers[order.driver_id]
+        if not driver.get("online"):
+            return None
+        return {"order": order.model_dump(mode="json"), "driver": self._public_driver(driver, "DISPATCHED")}
 
     def driver_financial_update(self, driver_id: str) -> dict:
         return {"driver": self._public_driver(self.drivers[driver_id]) if driver_id in self.drivers else None,
@@ -169,7 +168,7 @@ class LiveOrderCoordinator:
         batches = [batch.model_dump(mode="json") for batch in self.batches.values()]
         return {
             "users": list(self.users.values()),
-            "drivers": [self._public_driver(driver) for driver in self.drivers.values()],
+            "drivers": [self._public_driver(driver, "ONLINE") for driver in self.drivers.values() if driver.get("online")],
             "orders": [order.model_dump(mode="json") for order in self.orders.values()],
             "batches": batches,
             "batch": self.batch.model_dump(mode="json") if self.batch else None,
@@ -190,27 +189,27 @@ class LiveOrderCoordinator:
                 "registered_at": _utc_now(),
             }
             self.users[request.id] = user
-            matched_order_ids: list[str] = []
+            dispatched_order_ids: list[str] = []
             if request.role == "driver":
                 current = self.drivers.get(request.id, {})
-                position = request.location or current.get("position") or MONTERREY_CENTER
+                position = request.location or current.get("position")
                 self.drivers[request.id] = {
                     "id": request.id,
                     "name": request.name,
                     "online": True,
+                    # A socket without a real position is online but cannot be
+                    # selected as the closest courier.
+                    "is_available": position is not None,
                     "position": position,
                     "bearing": current.get("bearing", 0),
                     "speed_kmh": current.get("speed_kmh", 0),
-                    "street_name": current.get("street_name", "Monterrey"),
+                    "street_name": current.get("street_name"),
                     "assigned_order_ids": current.get("assigned_order_ids", []),
-                    "vehicle": current.get("vehicle", "Honda Cargo 150"),
-                    "rating": current.get("rating", 4.9),
-                    "avatar_url": current.get("avatar_url", "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=160&q=80"),
+                    "vehicle": request.vehicle,
+                    "avatar_url": request.avatar_url,
                     "updated_at": _utc_now(),
                 }
-                # A courier may open its laptop after client orders are already in the
-                # mesh. Match those pending orders immediately instead of requiring a
-                # client to resubmit.
+                # A real courier coming online may receive pending central orders.
                 for batch in self.batches.values():
                     if batch.driver_id:
                         continue
@@ -218,19 +217,23 @@ class LiveOrderCoordinator:
                     if batch_orders:
                         self._assign_driver(batch_orders, batch)
                         await self._attach_courier_route(batch_orders)
-                        matched_order_ids.extend(order.id for order in batch_orders if order.driver_id)
+                        dispatched_order_ids.extend(order.id for order in batch_orders if order.driver_id)
                 for order in self.orders.values():
                     if order.status == "PENDING" and not order.driver_id:
                         self._assign_driver([order])
                         await self._attach_courier_route([order])
                         if order.driver_id:
-                            matched_order_ids.append(order.id)
+                            dispatched_order_ids.append(order.id)
             driver = self._public_driver(self.drivers[request.id]) if request.id in self.drivers else None
-            return {"user": user, "driver": driver, "metrics": self._metrics(), "matched_order_ids": matched_order_ids}
+            return {"user": user, "driver": driver, "metrics": self._metrics(), "dispatched_order_ids": dispatched_order_ids}
 
     async def create_order(self, payload: dict) -> tuple[LiveOrder, BatchPlan | None]:
         request = LiveOrderRequest.model_validate(payload)
+        if haversine_km(request.origin[0], request.origin[1], request.destination[0], request.destination[1]) > MAX_DELIVERY_RADIUS_KM:
+            raise ValueError("La dirección de entrega excede el límite operativo de 20 km")
         estimate = await self.routing.estimate(tuple(request.origin), tuple(request.destination), TrafficState(), WeatherState())
+        if estimate.distance_km > MAX_DELIVERY_RADIUS_KM:
+            raise ValueError("La dirección de entrega excede el límite operativo de 20 km")
         async with self._lock:
             self._counter += 1
             order = LiveOrder(
@@ -265,7 +268,7 @@ class LiveOrderCoordinator:
     def _find_batch_partner(self, incoming: LiveOrder) -> LiveOrder | None:
         candidates = [
             order for order in self.orders.values()
-            if order.id != incoming.id and order.status in {"PENDING", "MATCHED"} and not order.batch_id
+            if order.id != incoming.id and order.status == "PENDING" and not order.batch_id
             and haversine_km(order.origin[0], order.origin[1], incoming.origin[0], incoming.origin[1]) <= 3.0
             and haversine_km(order.destination[0], order.destination[1], incoming.destination[0], incoming.destination[1]) <= 12.0
         ]
@@ -277,7 +280,8 @@ class LiveOrderCoordinator:
         order_ids = {order.id for order in orders}
         candidates = [
             driver for driver in self.drivers.values()
-            if driver["online"] and len(driver["assigned_order_ids"]) + len(order_ids - set(driver["assigned_order_ids"])) <= 2
+            if driver.get("online") and driver.get("is_available") and driver.get("position") is not None
+            and len(driver["assigned_order_ids"]) + len(order_ids - set(driver["assigned_order_ids"])) <= 2
         ]
         if not candidates:
             return None
@@ -298,7 +302,9 @@ class LiveOrderCoordinator:
             if previous_driver and previous_driver["id"] != driver["id"]:
                 previous_driver["assigned_order_ids"] = [assigned_id for assigned_id in previous_driver["assigned_order_ids"] if assigned_id != order.id]
                 previous_driver["updated_at"] = _utc_now()
-            order.status = "MATCHED"
+            # Dispatch is a reservation only. The courier must accept before this
+            # order becomes MATCHED and visible to the customer as assigned.
+            order.status = "PENDING"
             order.driver_id = driver["id"]
             order.batch_id = batch.id if batch else None
             if order.id not in driver["assigned_order_ids"]:
@@ -312,7 +318,7 @@ class LiveOrderCoordinator:
         if not orders or not orders[0].driver_id:
             return
         driver = self.drivers.get(orders[0].driver_id)
-        if not driver:
+        if not driver or not driver.get("position"):
             return
         estimate = await self.routing.estimate(
             tuple(driver["position"]), tuple(orders[0].origin), TrafficState(), WeatherState(),
@@ -352,40 +358,37 @@ class LiveOrderCoordinator:
         )
 
     async def _strategic_reasoning(self, first: LiveOrder, second: LiveOrder, savings: float) -> str:
-        synthetic_orders = [
-            Order(
-                id=order.id, restaurant=order.restaurant, pickup_lat=order.origin[0], pickup_lon=order.origin[1],
-                dropoff_lat=order.destination[0], dropoff_lon=order.destination[1], payout_mxn=100,
-                courier_payout_mxn=60, distance_km=order.distance_km, estimated_minutes=max(order.eta_minutes, 1),
-                pickup_deadline=20, delivery_deadline=55, zone="Monterrey",
-            ) for order in (first, second)
-        ]
-        try:
-            decision = await asyncio.wait_for(
-                self.agent.decide(DriverState(driver_id="rumbo-live", lat=first.origin[0], lon=first.origin[1]), synthetic_orders,
-                                  TrafficState(), WeatherState(), 0, 120), timeout=4,
-            )
-            if decision.reasoning:
-                return f"{decision.reasoning} Ahorro de distancia calculado: {savings:.1f}%"
-        except Exception:
-            pass
-        return f"Rumbo Edge agrupó los destinos cercanos de {first.client_name} y {second.client_name}. Ahorro calculado: {savings:.1f}%"
+        return (
+            f"Rumbo Edge grouped the real nearby destinations for {first.client_name} and "
+            f"{second.client_name}. Calculated distance saving: {savings:.1f}%"
+        )
 
     async def apply_driver_action(self, payload: dict) -> tuple[BatchPlan | None, list[LiveOrder]]:
         request = DriverActionRequest.model_validate(payload)
         async with self._lock:
-            batch = self.batches.get(request.batch_id or "") or self.batch
+            batch = self.batches.get(request.batch_id or "")
             orders = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders] if batch else []
             if request.order_id and request.order_id in self.orders:
                 orders = [self.orders[request.order_id]]
+                batch = self.batches.get(orders[0].batch_id or "")
+            elif not batch and self.batch and not request.order_id:
+                batch = self.batch
+                orders = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders]
             driver_id = request.driver_id or (batch.driver_id if batch else None) or (orders[0].driver_id if orders else None)
             if not orders:
                 return batch, []
-            if request.action in {"ACCEPT_BATCH", "ACCEPT_ASSIGNMENT", "START_DELIVERY"}:
+            if not driver_id or any(order.driver_id != driver_id for order in orders):
+                raise ValueError("This courier is not assigned to the selected order")
+            if request.action in {"ACCEPT_BATCH", "ACCEPT_ASSIGNMENT"}:
+                for order in orders:
+                    order.status = "MATCHED"
+                if batch:
+                    batch.status = "ACCEPTED"
+            elif request.action == "START_DELIVERY":
                 for order in orders:
                     order.status = "IN_TRANSIT"
                 if batch:
-                    batch.status = "ACCEPTED" if request.action == "ACCEPT_BATCH" else "IN_TRANSIT"
+                    batch.status = "IN_TRANSIT"
             elif request.action == "ARRIVED_RESTAURANT":
                 if batch:
                     batch.status = "AT_RESTAURANT"
@@ -401,6 +404,61 @@ class LiveOrderCoordinator:
                     batch.status = "COMPLETED"
             self._release_finished_driver(driver_id)
             return batch, orders
+
+    async def set_driver_online(self, driver_id: str, online: bool) -> dict | None:
+        """Socket presence is the only source of a courier's availability state."""
+        async with self._lock:
+            driver = self.drivers.get(driver_id)
+            if not driver:
+                return None
+            driver["online"] = online
+            driver["is_available"] = bool(online and driver.get("position") is not None)
+            driver["updated_at"] = _utc_now()
+            if not online:
+                self.telemetry.pop(driver_id, None)
+                # A dispatch is only a reservation until the courier accepts it.
+                # Once its real socket closes, return those pending orders to the
+                # central queue instead of leaving them tied to a ghost courier.
+                released_ids = {
+                    order.id for order in self.orders.values()
+                    if order.driver_id == driver_id and order.status == "PENDING"
+                }
+                for order_id in released_ids:
+                    order = self.orders[order_id]
+                    order.driver_id = None
+                    order.courier_route_geometry = []
+                    order.courier_distance_km = None
+                    order.courier_eta_minutes = None
+                for batch in self.batches.values():
+                    if batch.driver_id == driver_id and any(order_id in released_ids for order_id in batch.order_ids):
+                        batch.driver_id = None
+                driver["assigned_order_ids"] = [
+                    order_id for order_id in driver["assigned_order_ids"] if order_id not in released_ids
+                ]
+            return self._public_driver(driver, "ONLINE" if online else "OFFLINE")
+
+    async def redispatch_pending_orders(self) -> list[LiveOrder]:
+        """Assign queue entries only to couriers whose authenticated sockets remain live."""
+        async with self._lock:
+            dispatched: list[LiveOrder] = []
+            processed: set[str] = set()
+            for batch in self.batches.values():
+                batch_orders = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders]
+                if not batch_orders or batch.driver_id or any(order.status != "PENDING" or order.driver_id for order in batch_orders):
+                    continue
+                self._assign_driver(batch_orders, batch)
+                if batch.driver_id:
+                    await self._attach_courier_route(batch_orders)
+                    dispatched.extend(batch_orders)
+                    processed.update(order.id for order in batch_orders)
+            for order in self.orders.values():
+                if order.id in processed or order.status != "PENDING" or order.driver_id or order.batch_id:
+                    continue
+                self._assign_driver([order])
+                if order.driver_id:
+                    await self._attach_courier_route([order])
+                    dispatched.append(order)
+            return dispatched
 
     def _release_finished_driver(self, driver_id: str | None) -> None:
         if not driver_id or driver_id not in self.drivers:
@@ -454,7 +512,8 @@ class LiveOrderCoordinator:
             if not driver:
                 raise ValueError("Register the courier before sending telemetry")
             driver.update({"position": request.position, "bearing": request.bearing, "street_name": request.street_name,
-                           "speed_kmh": request.speed_kmh, "online": True, "updated_at": _utc_now()})
+                           "speed_kmh": request.speed_kmh, "updated_at": _utc_now()})
+            driver["is_available"] = bool(driver.get("online"))
             telemetry = {"driver_id": request.driver_id, "position": request.position, "bearing": request.bearing,
                          "street_name": request.street_name, "speed_kmh": request.speed_kmh, "timestamp": _utc_now()}
             self.telemetry[request.driver_id] = telemetry
@@ -466,6 +525,8 @@ class LiveOrderCoordinator:
             self.simulation_minutes += real_seconds * TIME_WARP / 60
             updates: list[dict] = []
             for driver_id, driver in self.drivers.items():
+                if not driver.get("online"):
+                    continue
                 active_orders = [self.orders[order_id] for order_id in driver["assigned_order_ids"] if order_id in self.orders and self.orders[order_id].status == "IN_TRANSIT"]
                 if not active_orders:
                     continue
