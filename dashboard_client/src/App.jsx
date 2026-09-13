@@ -6,7 +6,7 @@ import { ClientAssignmentModal } from './rumbo/ClientAssignmentModal'
 import { CommandCenter } from './rumbo/CommandCenter'
 import { DriverHUD } from './rumbo/DriverHUD'
 import { Landing } from './rumbo/Landing'
-import { DriverVehicleSelector, JudgeDashboardDock, ProtocolShiftClock, useProtocolShift } from './rumbo/ProtocolSuite'
+import { DriverVehicleSelector, ProtocolShiftClock, useProtocolShift } from './rumbo/ProtocolSuite'
 import { useRumboLive } from './rumbo/useRumboLive'
 import { useRumboRoute } from './rumbo/useRumboRoute'
 
@@ -85,7 +85,7 @@ function RouteScene({ path, query, navigate, liveState, socket, profile, onAuthe
     return <><ClientExperience profile={profile} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} protocol={protocol} /><ClientAssignmentModal assignment={assignment} /><NoCouriersModal notice={liveState.live.noCouriersNotice} onDismiss={liveState.dismissNoCouriersNotice} /></>
   }
   if (path === '/app/driver' && profile?.role === 'driver') return <><DriverHUD profile={profile} live={liveState.live} notification={liveState.driverNotifications?.[profile.id] || liveState.notification} onDismiss={() => liveState.dismissNotification(profile.id)} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} vehicleProfile={protocol.driverVehicles[profile.id]} /><DriverVehicleSelector profile={profile} live={liveState.live} protocol={protocol} /></>
-  if (path === '/app/dashboard') return <><CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} protocol={protocol} /><JudgeDashboardDock protocol={protocol} onTrigger={liveState.trigger} drivers={liveState.live.drivers || []} /></>
+  if (path === '/app/dashboard') return <CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} protocol={protocol} />
   return <Landing onAuthenticated={onAuthenticated} protocol={protocol} onLaunchFullDemo={protocol.launchFullDemo} />
 }
 

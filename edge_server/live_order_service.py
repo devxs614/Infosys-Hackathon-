@@ -43,6 +43,8 @@ VEHICLE_CAPACITY = {
     "car": (150.0, 200.0),
     "bike": (8.0, 12.0),
 }
+VEHICLE_SECONDS_PER_KM = {"moto": 3.0, "car": 3.9, "bike": 7.5}
+VEHICLE_DISPLAY_SPEED_KMH = {"moto": 45, "car": 35, "bike": 18}
 
 
 def _flagged_zone_id(position: list[float]) -> int | None:
@@ -55,6 +57,30 @@ def _flagged_zone_id(position: list[float]) -> int | None:
 
 def _minutes_in_day(value: float) -> float:
     return value % (24 * 60)
+
+
+def _point_on_geometry(geometry: list[list[float]], progress: float) -> tuple[list[float], float]:
+    """Interpolate by travelled street distance, never by polyline point count."""
+    if len(geometry) < 2:
+        point = geometry[0] if geometry else [-100.3161, 25.6866]
+        return [point[1], point[0]], 0.0
+    distances = [
+        haversine_km(start[1], start[0], end[1], end[0])
+        for start, end in zip(geometry, geometry[1:])
+    ]
+    total = max(sum(distances), 0.000_001)
+    remaining = min(1.0, max(0.0, progress)) * total
+    for index, distance in enumerate(distances):
+        if remaining <= distance or index == len(distances) - 1:
+            fraction = remaining / max(distance, 0.000_001)
+            lon, lat = geometry[index]
+            next_lon, next_lat = geometry[index + 1]
+            position = [lat + (next_lat - lat) * fraction, lon + (next_lon - lon) * fraction]
+            return position, _bearing(position, [next_lat, next_lon])
+        remaining -= distance
+    last = geometry[-1]
+    previous = geometry[-2]
+    return [last[1], last[0]], _bearing([previous[1], previous[0]], [last[1], last[0]])
 
 
 class NoDriversAvailableError(ValueError):
@@ -87,6 +113,8 @@ class LiveOrderCoordinator:
         self.batches: dict[str, BatchPlan] = {}
         self.batch: BatchPlan | None = None  # Compatibility for the original two-screen demo.
         self.dispatch_log: dict | None = None
+        self.dispatch_history: list[dict] = []
+        self.traffic_impact: dict = {"minutes": 0.0, "message": "Normal traffic conditions."}
         self._counter = 0
         self._batch_counter = 0
         self.simulation_minutes = 14 * 60.0
@@ -166,6 +194,22 @@ class LiveOrderCoordinator:
             "drivers": driver_rows,
         }
 
+    def _remember_decision(self, decision: dict) -> None:
+        """Retain an additive, serializable audit history for the judge UI."""
+        key = decision.get("id") or f"decision-{len(self.dispatch_history) + 1}"
+        decision["id"] = key
+        self.dispatch_log = decision
+        self.dispatch_history = [item for item in self.dispatch_history if item.get("id") != key]
+        self.dispatch_history.insert(0, decision)
+        self.dispatch_history = self.dispatch_history[:80]
+
+    def _record_safety_decision(self, *, order_id: str, tag: str, reason: str, origin: list[float] | None = None, destination: list[float] | None = None) -> None:
+        self._remember_decision({
+            "id": f"safety-{order_id}-{tag.lower().replace(' ', '-')}", "order_ids": [order_id],
+            "selected_driver_id": None, "candidates": [], "reason": reason, "tags": [tag],
+            "origin": origin, "destination": destination, "created_at": _utc_now(),
+        })
+
     def verdict_evaluation(self) -> dict:
         batch = self.batch
         if batch is None:
@@ -221,6 +265,8 @@ class LiveOrderCoordinator:
             "financials": self.financial_snapshot(),
             "verdict": self.verdict_evaluation(),
             "dispatch_log": self.dispatch_log,
+            "dispatch_history": self.dispatch_history,
+            "traffic_impact": self.traffic_impact,
         }
 
     async def register_user(self, payload: dict) -> dict:
@@ -292,17 +338,32 @@ class LiveOrderCoordinator:
         if haversine_km(request.origin[0], request.origin[1], request.destination[0], request.destination[1]) > MAX_DELIVERY_RADIUS_KM:
             raise ValueError("La dirección de entrega excede el límite operativo de 20 km")
         if _minutes_in_day(self.simulation_minutes) >= 22 * 60 and _flagged_zone_id(request.destination):
+            self._record_safety_decision(
+                order_id=f"request-{self._counter + 1}", tag="FLAGGED ZONE PREVENTED",
+                reason="Flagged Zone prevented: delivery selection is unavailable after 22:00.",
+                origin=request.origin, destination=request.destination,
+            )
             raise ValueError("🚫 Flagged Zone unavailable after 22:00")
         async with self._lock:
-            self.dispatch_log = None
             if not self._candidate_drivers():
+                active_drivers = [driver for driver in self.drivers.values() if driver.get("online")]
+                tag = "HEAT RULE BLOCKED" if any(driver.get("status") == "ON_BREAK" for driver in active_drivers) else "VEHICLE CAPACITY BLOCKED"
+                self._record_safety_decision(
+                    order_id=f"request-{self._counter + 1}", tag=tag,
+                    reason="No eligible courier can safely accept this order under the current Pi dispatch constraints.",
+                    origin=request.origin, destination=request.destination,
+                )
                 raise NoDriversAvailableError("No hay repartidores disponibles en este momento")
         estimate, _ = await self._conditioned_route(request.origin, request.destination)
         if estimate.distance_km > MAX_DELIVERY_RADIUS_KM:
             raise ValueError("La dirección de entrega excede el límite operativo de 20 km")
         async with self._lock:
-            self.dispatch_log = None
             if not self._candidate_drivers():
+                self._record_safety_decision(
+                    order_id=f"request-{self._counter + 1}", tag="VEHICLE CAPACITY BLOCKED",
+                    reason="No eligible courier remains after central capacity and availability validation.",
+                    origin=request.origin, destination=request.destination,
+                )
                 raise NoDriversAvailableError("No hay repartidores disponibles en este momento")
             self._counter += 1
             order = LiveOrder(
@@ -452,10 +513,19 @@ class LiveOrderCoordinator:
             driver = self.drivers.get(driver_id)
             if not driver:
                 return None
-            driver["delay_until_minute"] = self.simulation_minutes + max(1.0, minutes)
+            applied_minutes = max(1.0, minutes)
+            driver["delay_until_minute"] = self.simulation_minutes + applied_minutes
             driver["status"] = "DELAYED"
             driver["is_available"] = False
             driver["updated_at"] = _utc_now()
+            # The customer and Command Center consume these server-owned ETAs;
+            # apply the selected kitchen delay once, without creating a local UI
+            # estimate or compounding it every telemetry tick.
+            for order in self.orders.values():
+                if order.driver_id == driver_id and order.status in {"PENDING", "MATCHED", "IN_TRANSIT"}:
+                    order.eta_minutes = round(order.eta_minutes + applied_minutes, 1)
+                    if order.status == "MATCHED":
+                        order.courier_eta_minutes = round(order.courier_eta_minutes + applied_minutes, 1)
             return self._public_driver(driver, "DELAYED")
 
     def _candidate_drivers(self, orders: Iterable[LiveOrder] = ()) -> list[dict]:
@@ -483,30 +553,37 @@ class LiveOrderCoordinator:
             # the value score only after physical route cost is accounted for.
             key=lambda value: (value[2] - min(tip_value, 100) / 25, value[2], value[1], len(value[0]["assigned_order_ids"]), value[0]["id"]),
         )
-        if len(evaluations) >= 2:
-            slowest_eta = max(eta for _, _, eta, _ in evaluations)
-            saved_minutes = max(0, round(slowest_eta - selected_eta, 1))
-            self.dispatch_log = {
-                "order_ids": [order.id for order in orders],
-                "selected_driver_id": selected["id"],
-                "candidates": [
-                    {
-                        "driver_id": driver["id"], "name": driver["name"],
-                        "distance_km": distance, "eta_minutes": eta,
-                        "penalty": " · ".join(penalties) if penalties else "Clear corridor",
-                        "selected": driver["id"] == selected["id"],
-                    }
-                    for driver, distance, eta, penalties in evaluations
-                ],
-                "reason": (
-                    f"{selected['name']} avoids the highest weather/traffic cost, saving "
-                    f"{saved_minutes:.1f} min despite the route distance."
-                ),
-                "weather_traffic_aware": True,
-                "selected_distance_km": selected_distance,
-                "selected_eta_minutes": selected_eta,
-                "created_at": _utc_now(),
-            }
+        slowest_eta = max(eta for _, _, eta, _ in evaluations)
+        saved_minutes = max(0, round(slowest_eta - selected_eta, 1))
+        tags = ["PROFIT OPTIMIZED"]
+        if tip_value >= 30:
+            tags.append("TIP PRIORITIZED")
+        if any(penalties for _, _, _, penalties in evaluations):
+            tags.append("TRAFFIC AWARE")
+        selected_vehicle = self._vehicle_key(selected.get("vehicle_profile") or selected.get("vehicle"))
+        comparison = f" over {len(evaluations) - 1} alternative courier(s)" if len(evaluations) > 1 else " as the only eligible courier"
+        tip_reason = f" after evaluating a ${tip_value:.0f} MXN tip" if tip_value else ""
+        self._remember_decision({
+            "id": f"dispatch-{'-'.join(order.id for order in orders)}-{int(self.simulation_minutes * 10)}",
+            "order_ids": [order.id for order in orders], "selected_driver_id": selected["id"],
+            "candidates": [
+                {
+                    "driver_id": driver["id"], "name": driver["name"],
+                    "vehicle": self._vehicle_key(driver.get("vehicle_profile") or driver.get("vehicle")),
+                    "distance_km": distance, "eta_minutes": eta,
+                    "penalty": " · ".join(penalties) if penalties else "Clear corridor",
+                    "selected": driver["id"] == selected["id"],
+                }
+                for driver, distance, eta, penalties in evaluations
+            ],
+            "reason": (
+                f"Selected {selected['name']} ({selected_vehicle}, ETA {selected_eta:.1f} min){comparison}"
+                f"{tip_reason}; the OSRM route saves {saved_minutes:.1f} min under current constraints."
+            ),
+            "tags": tags, "weather_traffic_aware": True, "selected_distance_km": selected_distance,
+            "selected_eta_minutes": selected_eta, "origin": origin, "destination": orders[0].destination,
+            "created_at": _utc_now(),
+        })
         return selected
 
     async def _assign_driver(self, orders: list[LiveOrder], batch: BatchPlan | None = None) -> dict | None:
@@ -784,6 +861,8 @@ class LiveOrderCoordinator:
         ]
         origins = [[25.6496, -100.3595], [25.6518, -100.2894], [25.6819, -100.3697]]
         async with self._lock:
+            self.dispatch_history = []
+            self.dispatch_log = None
             for collection in (self.users, self.drivers, self.telemetry):
                 for key in [key for key in collection if key.startswith("demo-")]:
                     collection.pop(key, None)
@@ -814,7 +893,7 @@ class LiveOrderCoordinator:
                     status="MATCHED",
                     distance_km=distance, eta_minutes=round(max(3, distance * 3.5), 1),
                     delivery_fee_mxn=round(39 + distance * 8.5, 2), courier_payout_mxn=round(35 + distance * 7.25, 2),
-                    platform_commission_mxn=round(max(0, 4 + distance * 1.25), 2), tip_mxn=(index % 4) * 15,
+                    platform_commission_mxn=round(max(0, 4 + distance * 1.25), 2), tip_mxn=50 if index % 4 == 0 else (index % 4) * 15,
                     weight_kg=3.0, volume_liters=4.0,
                     route_geometry=[[origin[1], origin[0]], [destination[1], destination[0]]], street_names=["Monterrey street mesh"],
                 )
@@ -827,6 +906,33 @@ class LiveOrderCoordinator:
                 order.courier_street_names = ["Monterrey street mesh"]
                 driver["assigned_order_ids"].append(order.id)
                 self.orders[order.id] = order
+                alternate = next((item for item in self.drivers.values() if item["id"] != driver["id"]), None)
+                tags = ["PROFIT OPTIMIZED"]
+                if order.tip_mxn >= 50:
+                    tags.append("TIP PRIORITIZED")
+                if index in {5, 11}:
+                    tags.append("VEHICLE CAPACITY BLOCKED")
+                if index == 13:
+                    tags.append("HEAT RULE BLOCKED")
+                if index == 15:
+                    tags.append("FLAGGED ZONE PREVENTED")
+                alternate_eta = round(max(order.courier_eta_minutes + 1.8, 2), 1)
+                self._remember_decision({
+                    "id": f"demo-decision-{index:03d}", "order_ids": [order.id],
+                    "selected_driver_id": driver["id"], "origin": origin, "destination": destination,
+                    "candidates": [
+                        {"driver_id": driver["id"], "name": driver["name"], "vehicle": driver["vehicle_profile"],
+                         "distance_km": order.courier_distance_km, "eta_minutes": order.courier_eta_minutes,
+                         "penalty": "Clear corridor", "selected": True},
+                        *([{ "driver_id": alternate["id"], "name": alternate["name"],
+                             "vehicle": alternate["vehicle_profile"], "distance_km": round(order.courier_distance_km + .8, 2),
+                             "eta_minutes": alternate_eta, "penalty": "Longer OSRM approach", "selected": False}] if alternate else []),
+                    ],
+                    "tags": tags,
+                    "reason": f"Selected {driver['name']} ({driver['vehicle_profile']}, ETA {order.courier_eta_minutes:.1f} min) over the next OSRM candidate; "
+                              f"{('$50 MXN tip prioritized. ' if order.tip_mxn >= 50 else '')}the route keeps the highlighted demo within safety and capacity constraints.",
+                    "created_at": _utc_now(),
+                })
             return self.snapshot()
 
     async def advance(self, real_seconds: float = 0.5, simulated_minutes: float | None = None) -> list[dict]:
@@ -868,30 +974,26 @@ class LiveOrderCoordinator:
                 active = active_orders[0]
                 batch = self.batches.get(active.batch_id or "")
                 batch_orders = [self.orders[order_id] for order_id in batch.order_ids if order_id in self.orders] if batch else []
+                vehicle_key = self._vehicle_key(driver.get("vehicle_profile") or driver.get("vehicle"))
+                seconds_per_km = VEHICLE_SECONDS_PER_KM[vehicle_key]
+                display_speed = VEHICLE_DISPLAY_SPEED_KMH[vehicle_key]
                 if active.status == "MATCHED":
                     # Phase one: the courier follows the server-calculated OSRM
                     # approach route to the restaurant before delivery begins.
                     geometry = active.courier_route_geometry
                     if len(geometry) < 2:
                         continue
-                    route_seconds = max(active.courier_distance_km * MOTION_SECONDS_PER_KM, .01)
+                    route_seconds = max(active.courier_distance_km * seconds_per_km, .01)
                     key = f"_approach_{batch.id if batch else active.id}"
                     progress = min(1.0, driver.get(key, 0.0) + real_seconds / route_seconds)
                     driver[key] = progress
-                    segment_progress = progress * (len(geometry) - 1)
-                    index = min(len(geometry) - 1, int(segment_progress))
-                    next_index = min(index + 1, len(geometry) - 1)
-                    fraction = segment_progress - index
-                    lon, lat = geometry[index]
-                    next_lon, next_lat = geometry[next_index]
-                    position = [lat + (next_lat - lat) * fraction, lon + (next_lon - lon) * fraction]
-                    bearing = _bearing(position, [next_lat, next_lon]) if index < len(geometry) - 1 else driver.get("bearing", 0)
+                    position, bearing = _point_on_geometry(geometry, progress)
                     street_names = active.courier_street_names
                     street_index = min(len(street_names) - 1, int(progress * len(street_names))) if street_names else 0
                     telemetry = {
                         "driver_id": driver_id, "position": position, "bearing": round(bearing, 1),
                         "street_name": street_names[street_index] if street_names else "",
-                        "speed_kmh": 45, "order_id": active.id, "phase": "COURIER_TO_STORE",
+                        "speed_kmh": display_speed, "order_id": active.id, "phase": "COURIER_TO_STORE",
                         "progress": round(progress, 4), "timestamp": _utc_now(),
                     }
                     driver.update(telemetry)
@@ -911,33 +1013,24 @@ class LiveOrderCoordinator:
                 # a restaurant-specific route.
                 if batch and len(batch_orders) > 1:
                     geometry = [[lon, lat] for lat, lon in batch.route]
-                    route_seconds = max(batch.batch_distance_km * MOTION_SECONDS_PER_KM, .01)
+                    route_seconds = max(batch.batch_distance_km * seconds_per_km, .01)
                     key = f"_progress_{batch.id}"
                     street_names = [name for order in batch_orders for name in order.street_names]
                 else:
                     geometry = active.route_geometry or [[active.origin[1], active.origin[0]], [active.destination[1], active.destination[0]]]
-                    route_seconds = max(active.distance_km * MOTION_SECONDS_PER_KM, .01)
+                    route_seconds = max(active.distance_km * seconds_per_km, .01)
                     key = f"_progress_{active.id}"
                     street_names = active.street_names
                 progress = min(1.0, driver.get(key, 0.0) + real_seconds / route_seconds)
                 driver[key] = progress
-                segment_progress = progress * max(len(geometry) - 1, 1)
-                index = min(len(geometry) - 1, int(segment_progress))
-                next_index = min(index + 1, len(geometry) - 1)
-                segment_fraction = segment_progress - index
-                lon, lat = geometry[index]
-                next_lon, next_lat = geometry[next_index]
-                # This is intentionally an interpolation on the OSRM geometry itself,
-                # not a straight-line shortcut between destinations.
-                lon = lon + (next_lon - lon) * segment_fraction
-                lat = lat + (next_lat - lat) * segment_fraction
-                position = [lat, lon]
-                bearing = _bearing(position, [next_lat, next_lon]) if index < len(geometry) - 1 else driver.get("bearing", 0)
+                # This is intentionally distance-weighted interpolation on the
+                # OSRM geometry itself, never a shortcut between destinations.
+                position, bearing = _point_on_geometry(geometry, progress)
                 street_index = min(len(street_names) - 1, int(progress * len(street_names))) if street_names else 0
                 telemetry = {
                     "driver_id": driver_id, "position": position, "bearing": round(bearing, 1),
                     "street_name": street_names[street_index] if street_names else "",
-                    "speed_kmh": 45, "order_id": active.id, "phase": "STORE_TO_CLIENT",
+                    "speed_kmh": display_speed, "order_id": active.id, "phase": "STORE_TO_CLIENT",
                     "progress": round(progress, 4), "timestamp": _utc_now(),
                 }
                 driver.update(telemetry)
@@ -968,15 +1061,32 @@ class LiveOrderCoordinator:
                 order for order in self.orders.values()
                 if order.status in {"PENDING", "MATCHED", "IN_TRANSIT"}
             ]
+            added_minutes: list[float] = []
             # Refresh every active order's customer-facing ETA with the exact same
             # sector-aware route-cost policy used to choose a courier.
             for order in active_orders:
+                previous_eta = order.eta_minutes
                 direct, _ = await self._conditioned_route(order.origin, order.destination)
                 order.distance_km = round(direct.distance_km, 2)
                 order.eta_minutes = round(direct.duration_minutes, 1)
                 order.route_geometry = direct.geometry
                 order.street_names = direct.street_names
                 order.delivery_fee_mxn = round(39 + direct.distance_km * 8.5, 2)
+                added_minutes.append(max(0.0, order.eta_minutes - previous_eta))
+
+            impact_minutes = round(max(added_minutes, default=0.0), 1)
+            impact_label = {
+                "TORRENTIAL_RAIN": "torrential rain",
+                "SAN_PEDRO_CONGESTION": "San Pedro congestion",
+                "GONZALITOS_FLOOD": "Gonzalitos flooding",
+                "ROAD_CLOSURE": "road closure",
+                "NORMAL_TRAFFIC": "normal traffic",
+            }.get(disruption, "traffic conditions")
+            self.traffic_impact = {
+                "minutes": impact_minutes,
+                "event": disruption,
+                "message": "Normal traffic conditions." if disruption == "NORMAL_TRAFFIC" else f"+{impact_minutes:.1f} min due to {impact_label}.",
+            }
 
             # A closure or weather event also changes the approach leg. Refresh
             # it for every assigned active courier, not just a batch route.

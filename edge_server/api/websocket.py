@@ -112,8 +112,12 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                     await manager.send(websocket, "NO_DRIVERS_AVAILABLE", {
                         "status": "NO_DRIVERS_AVAILABLE", "message": str(exc),
                     })
+                    if websocket.app.state.live_orders.dispatch_log:
+                        await manager.broadcast("AI_DISPATCH_LOG", websocket.app.state.live_orders.dispatch_log)
                 except ValueError as exc:
                     await manager.send(websocket, "error", {"message": str(exc)})
+                    if websocket.app.state.live_orders.dispatch_log:
+                        await manager.broadcast("AI_DISPATCH_LOG", websocket.app.state.live_orders.dispatch_log)
 
             elif message_type == "CANCEL_ORDER":
                 try:

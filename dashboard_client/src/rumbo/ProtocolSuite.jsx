@@ -35,6 +35,7 @@ export function useProtocolShift() {
   const [replay, setReplay] = useState(null)
   const [driverVehicles, setDriverVehicles] = useState({})
   const [closurePinMode, setClosurePinMode] = useState(false)
+  const [roadClosures, setRoadClosures] = useState([])
 
   useEffect(() => {
     let active = true
@@ -43,19 +44,21 @@ export function useProtocolShift() {
       setSimulatedMinutes(state.simulated_minutes)
       setPaused(Boolean(state.paused))
       setShock(state.shock || null)
+      setRoadClosures(state.road_closures || [])
     }).catch(() => {})
     return () => { active = false }
   }, [])
 
   useEffect(() => {
-    broadcastVisualState({ simulatedMinutes, shock, vehicle: configuration.vehicle })
-  }, [configuration.vehicle, shock, simulatedMinutes])
+    broadcastVisualState({ simulatedMinutes, shock, roadClosures, vehicle: configuration.vehicle })
+  }, [configuration.vehicle, roadClosures, shock, simulatedMinutes])
 
   const applyServerState = useCallback((state) => {
     if (!state || typeof state.simulated_minutes !== 'number') return
     setSimulatedMinutes(state.simulated_minutes)
     setPaused(Boolean(state.paused))
     setShock(state.shock || null)
+    setRoadClosures(state.road_closures || [])
   }, [])
 
   const configure = async (nextConfiguration) => {
@@ -118,7 +121,7 @@ export function useProtocolShift() {
   const launchFullDemo = useCallback(() => demoApi.launchFullAutonomousDemo(), [])
 
   return {
-    configuration, simulatedMinutes, clock: formatClock(simulatedMinutes), paused, degraded, shock, replay, driverVehicles,
+    configuration, simulatedMinutes, clock: formatClock(simulatedMinutes), paused, degraded, shock, roadClosures, replay, driverVehicles,
     closurePinMode, setClosurePinMode,
     setPaused: setServerPaused, setSimulatedMinutes: setServerMinutes,
     configure, toggleDegraded, setShock: triggerShock, setReplay, selectVehicle, triggerShock, pinRoadClosure, delayDriver, launchFullDemo, onSocketMessage,

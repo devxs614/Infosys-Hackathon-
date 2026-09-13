@@ -26,7 +26,7 @@ export function flaggedZoneAt(position) {
 }
 
 function icon(kind, bearing = 0) {
-  const symbols = { pickup: '●', destination: '⌖', driver: '➤', flag: '🚩' }
+  const symbols = { pickup: '●', destination: '⌖', driver: '➤', flag: '🚩', closure: '🛑' }
   return L.divIcon({
     className: `rumbo-marker rumbo-marker-${kind}`,
     html: `<span style="transform:rotate(${kind === 'driver' ? bearing : 0}deg)">${symbols[kind] || '●'}</span>`,
@@ -47,22 +47,35 @@ function pointAtProgress(line, rawProgress) {
   const progress = Math.min(1, Math.max(0, rawProgress || 0))
   if (line.length === 0) return null
   if (line.length === 1) return { position: line[0], bearing: 0, progress }
-  const scaled = progress * (line.length - 1)
-  const index = Math.min(line.length - 1, Math.floor(scaled))
-  const nextIndex = Math.min(line.length - 1, index + 1)
-  const fraction = scaled - index
-  const from = line[index]
-  const to = line[nextIndex]
-  const position = [from[0] + (to[0] - from[0]) * fraction, from[1] + (to[1] - from[1]) * fraction]
-  const finalBearing = bearingBetween(line[line.length - 2], line[line.length - 1])
-  return { position, bearing: index < line.length - 1 ? bearingBetween(position, to) : finalBearing, progress }
+  const kmBetween = (from, to) => {
+    const radius = 6371
+    const dLat = (to[0] - from[0]) * Math.PI / 180
+    const dLon = (to[1] - from[1]) * Math.PI / 180
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(from[0] * Math.PI / 180) * Math.cos(to[0] * Math.PI / 180) * Math.sin(dLon / 2) ** 2
+    return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  }
+  const segmentLengths = line.slice(1).map((point, index) => kmBetween(line[index], point))
+  const total = Math.max(segmentLengths.reduce((sum, value) => sum + value, 0), .000001)
+  let remaining = progress * total
+  for (let index = 0; index < segmentLengths.length; index += 1) {
+    const length = segmentLengths[index]
+    if (remaining <= length || index === segmentLengths.length - 1) {
+      const fraction = Math.min(1, remaining / Math.max(length, .000001))
+      const from = line[index]
+      const to = line[index + 1]
+      const position = [from[0] + (to[0] - from[0]) * fraction, from[1] + (to[1] - from[1]) * fraction]
+      return { position, bearing: bearingBetween(position, to), progress, index }
+    }
+    remaining -= length
+  }
+  const finalIndex = line.length - 2
+  return { position: line.at(-1), bearing: bearingBetween(line[finalIndex], line.at(-1)), progress, index: finalIndex }
 }
 
 function splitRoute(line, progress) {
   if (!line.length || typeof progress !== 'number') return { completed: [], pending: line }
   const point = pointAtProgress(line, progress)
-  const scaled = point.progress * (line.length - 1)
-  const index = Math.min(line.length - 1, Math.floor(scaled))
+  const index = point.index ?? 0
   return {
     completed: [...line.slice(0, index + 1), ...(index < line.length - 1 ? [point.position] : [])],
     pending: [point.position, ...line.slice(index + 1)],
@@ -77,12 +90,6 @@ function usePolylineDriver(driver, line) {
   const [moving, setMoving] = useState(null)
   const lastProgress = useRef(typeof driver?.progress === 'number' ? driver.progress : 0)
   const currentProgress = useRef(lastProgress.current)
-  const [vehicle, setVehicle] = useState('moto')
-  useEffect(() => {
-    const updateVehicle = (event) => setVehicle(event.detail?.vehicle || 'moto')
-    window.addEventListener('rumbo-protocol-visual', updateVehicle)
-    return () => window.removeEventListener('rumbo-protocol-visual', updateVehicle)
-  }, [])
   useEffect(() => {
     if (!driver?.position || !line.length || typeof driver.progress !== 'number') {
       setMoving(driver ? { ...driver } : null)
@@ -99,8 +106,9 @@ function usePolylineDriver(driver, line) {
       // sends a fresh progress snapshot every 500 ms.
       elapsed += now - previousFrame
       previousFrame = now
-      const visualDuration = { moto: 500, car: 645, bike: 1250 }[vehicle] || 500
-      const ratio = Math.min(1, elapsed / visualDuration)
+      // The server owns physical speed (moto 1 km/3 s, car/bike adjusted).
+      // This only fills its 500 ms telemetry cadence at display frame rate.
+      const ratio = Math.min(1, elapsed / 500)
       const routePoint = pointAtProgress(line, from + (target - from) * ratio)
       currentProgress.current = routePoint.progress
       const next = { ...driver, ...routePoint }
@@ -110,12 +118,12 @@ function usePolylineDriver(driver, line) {
     }
     frame = requestAnimationFrame(animate)
     return () => cancelAnimationFrame(frame)
-  }, [driver?.timestamp, driver?.updated_at, driver?.phase, line, vehicle])
+  }, [driver?.timestamp, driver?.updated_at, driver?.phase, line])
   return moving || driver || null
 }
 
 function useProtocolMapState() {
-  const [state, setState] = useState({ simulatedMinutes: 0, shock: null })
+  const [state, setState] = useState({ simulatedMinutes: 0, shock: null, roadClosures: [] })
   useEffect(() => {
     const update = (event) => setState((current) => ({ ...current, ...event.detail }))
     window.addEventListener('rumbo-protocol-visual', update)
@@ -124,15 +132,17 @@ function useProtocolMapState() {
   return state
 }
 
-function Bounds({ points }) {
+function Bounds({ points, focusKey, focusPoints }) {
   const map = useMap()
-  const fitted = useRef(false)
+  const lastFocus = useRef(null)
   useEffect(() => {
-    if (!fitted.current && points.length > 1) {
-      fitted.current = true
-      map.fitBounds(points, { padding: [34, 34], maxZoom: 14, animate: true })
+    const nextFocus = focusKey || 'initial'
+    const target = focusPoints?.length > 1 ? focusPoints : points
+    if (lastFocus.current !== nextFocus && target.length > 1) {
+      lastFocus.current = nextFocus
+      map.fitBounds(target, { padding: [34, 34], maxZoom: 14, animate: true })
     }
-  }, [map, points])
+  }, [focusKey, focusPoints, map, points])
   return null
 }
 
@@ -149,7 +159,7 @@ function normalizeRoute(route, routeCoordinates) {
 export function RumboMap({
   className = '', origin, destination, route = [], routeCoordinates = 'lonlat', driver, drivers = [], orders = [],
   courierRoute = [], courierRouteCoordinates = 'lonlat', interactive = false, onDestinationChange, showBounds = true,
-  closurePinMode = false, onRoadClosure,
+  closurePinMode = false, onRoadClosure, focusKey, focusPoints,
 }) {
   const originPoint = origin?.coords || origin
   const destinationPoint = destination?.coords || destination
@@ -165,15 +175,17 @@ export function RumboMap({
   const orderPoints = orders.map((order) => order.destination || order.location).filter(Boolean)
   const movingDriverId = movingDriver?.id || movingDriver?.driver_id
   const otherDrivers = drivers.filter((item) => item?.position && item.id !== movingDriverId)
-  const points = [originPoint, destinationPoint, movingDriver?.position, ...otherDrivers.map((item) => item.position), ...courierLine, ...line, ...orderPoints].filter(Boolean)
+  const closures = protocolState.roadClosures || []
+  const points = [originPoint, destinationPoint, movingDriver?.position, ...otherDrivers.map((item) => item.position), ...courierLine, ...line, ...orderPoints, ...closures.map((closure) => closure.position)].filter(Boolean)
   const nightRestriction = protocolState.simulatedMinutes >= 22 * 60
-  return <div className={`rumbo-map relative overflow-hidden rounded-[1.6rem] border border-white/10 bg-[#0a111c] ${className}`}>
+  return <div className={`rumbo-map relative overflow-hidden rounded-[1.6rem] border border-white/10 bg-[#0a111c] ${closurePinMode ? 'rumbo-map-closure-mode' : ''} ${className}`}>
     <MapContainer center={destinationPoint || originPoint || monterreyCenter} zoom={12} scrollWheelZoom className="h-full w-full" zoomControl={false} attributionControl>
       <TileLayer url={tileUrl} attribution={tileAttribution} />
-      {showBounds && <Bounds points={points} />}
+      {showBounds && <Bounds points={points} focusKey={focusKey} focusPoints={focusPoints} />}
       {(interactive || closurePinMode) && <ClickToPlace onChange={closurePinMode ? onRoadClosure : onDestinationChange} />}
       {flaggedZones.map((zone) => <Polygon key={zone.id} positions={zone.area} pathOptions={{ color: '#ff0055', weight: 1.5, fillColor: '#ff0055', fillOpacity: .25, className: nightRestriction ? 'rumbo-risk-zone rumbo-risk-zone-active' : 'rumbo-risk-zone' }}><Tooltip direction="top" permanent={nightRestriction}>🚩 Zone {zone.id} · {zone.name}</Tooltip></Polygon>)}
       {flaggedZones.map((zone) => <Marker key={`flag-${zone.id}`} position={zone.center} icon={icon('flag')}><Tooltip direction="top" offset={[0, -12]} permanent>🚩 Zone {zone.id} · {zone.name}</Tooltip></Marker>)}
+      {closures.map((closure, index) => <Marker key={`closure-${index}-${closure.position?.join('-')}`} position={closure.position} icon={icon('closure')}><Tooltip direction="top" offset={[0, -12]} permanent>🛑 ROAD CLOSED · {closure.label || 'Pinned closure'}</Tooltip></Marker>)}
       {courierLine.length > 1 && <>
         {courierSplit.completed.length > 1 && <Polyline positions={courierSplit.completed} pathOptions={{ color: '#94a3b8', weight: 6, opacity: .32, lineCap: 'round' }} />}
         {courierSplit.pending.length > 1 && <><Polyline positions={courierSplit.pending} pathOptions={{ color: '#f59e0b', weight: 10, opacity: .15, lineCap: 'round', dashArray: '4 10' }} /><Polyline positions={courierSplit.pending} pathOptions={{ color: '#fbbf24', weight: 4, opacity: .96, lineCap: 'round', dashArray: '4 10' }} /></>}

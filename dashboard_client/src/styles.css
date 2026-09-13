@@ -36,6 +36,10 @@
 .rumbo-marker-destination span { background: #06b6d4; }
 .rumbo-marker-driver span { background: #f59e0b; color: #111827; font-size: 18px; }
 .rumbo-marker-flag span { height: auto; width: auto; border: 0; border-radius: 0; background: transparent; box-shadow: 0 0 22px rgba(255,0,85,.8); font-size: 24px; }
+.rumbo-marker-closure span { height: auto; width: auto; border: 0; border-radius: 0; background: transparent; box-shadow: 0 0 22px rgba(255, 71, 87, .9); font-size: 23px; }
+.rumbo-map-closure-mode .leaflet-container { cursor: crosshair; }
+.rumbo-noise > header > button:first-child > span:first-child { min-width: 74px; min-height: 27px; padding: 0; background-color: transparent; background-image: url('/rumbo-logo.png'); background-position: left center; background-repeat: no-repeat; background-size: contain; box-shadow: none; }
+.rumbo-noise > header > button:first-child > span:first-child > svg { display: none; }
 .rumbo-risk-zone { filter: drop-shadow(0 0 5px rgba(255,0,85,.35)); }
 .rumbo-risk-zone-active { animation: flagged-zone-pulse 1.35s ease-in-out infinite; }
 .protocol-rain { overflow: hidden; background-image: repeating-linear-gradient(112deg, transparent 0 14px, rgba(148, 224, 255, .38) 15px 16px, transparent 17px 31px); animation: protocol-rain-fall .5s linear infinite; mix-blend-mode: screen; opacity: .58; }

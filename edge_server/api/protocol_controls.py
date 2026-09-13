@@ -34,7 +34,7 @@ class TimeSyncRequest(BaseModel):
 
 
 class ShockRequest(BaseModel):
-    shock: Literal["surge", "closure", "rain", "delay", "normal"]
+    shock: Literal["surge", "closure", "rain", "delay", "congestion", "flood", "normal"]
     zone: str | None = Field(default=None, max_length=120)
 
 
@@ -53,6 +53,8 @@ _SHOCK_EVENTS = {
     "closure": EventType.ROAD_CLOSURE,
     "rain": EventType.TORRENTIAL_RAIN,
     "delay": EventType.SAN_PEDRO_CONGESTION,
+    "congestion": EventType.SAN_PEDRO_CONGESTION,
+    "flood": EventType.GONZALITOS_FLOOD,
     "normal": EventType.NORMAL_TRAFFIC,
 }
 

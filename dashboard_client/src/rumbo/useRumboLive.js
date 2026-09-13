@@ -3,7 +3,7 @@ import { demoApi } from '../services/api'
 
 export function useRumboLive() {
   const [simulation, setSimulation] = useState(null)
-  const [live, setLive] = useState({ users: [], drivers: [], orders: [], batches: [], batch: null, telemetry: {}, metrics: {}, financials: { platform: {}, drivers: [] }, verdict: null, dispatch_log: null, orderMatches: {}, noDriverOrders: {}, noCouriersNotice: null })
+  const [live, setLive] = useState({ users: [], drivers: [], orders: [], batches: [], batch: null, telemetry: {}, metrics: {}, financials: { platform: {}, drivers: [] }, verdict: null, dispatch_log: null, dispatch_history: [], traffic_impact: null, orderMatches: {}, noDriverOrders: {}, noCouriersNotice: null })
   const [notification, setNotification] = useState(null)
   const [driverNotifications, setDriverNotifications] = useState({})
   const [error, setError] = useState('')
@@ -11,7 +11,7 @@ export function useRumboLive() {
     const data = message.data || {}
     if (message.type === 'hello_response') setSimulation(data.state || null)
     if (message.type === 'simulation_state') setSimulation(data)
-    if (message.type === 'live_order_state' || message.type === 'LIVE_ORDER_STATE') setLive((current) => ({ ...current, ...data, orderMatches: current.orderMatches || {}, noDriverOrders: current.noDriverOrders || {}, noCouriersNotice: current.noCouriersNotice || null }))
+    if (message.type === 'live_order_state' || message.type === 'LIVE_ORDER_STATE') setLive((current) => ({ ...current, ...data, dispatch_history: data.dispatch_history || current.dispatch_history || [], orderMatches: current.orderMatches || {}, noDriverOrders: current.noDriverOrders || {}, noCouriersNotice: current.noCouriersNotice || null }))
     if (message.type === 'NEW_ORDER') setLive((current) => ({ ...current, orders: [...current.orders.filter((order) => order.id !== data.order?.id), data.order] }))
     if (message.type === 'AI_BATCH_SUGGESTION' || message.type === 'AI_BATCH_OPTIMIZATION') setLive((current) => ({ ...current, batch: data, batches: [...(current.batches || []).filter((batch) => batch.id !== data.id), data] }))
     if (message.type === 'DRIVER_NOTIFICATION') {
@@ -38,7 +38,7 @@ export function useRumboLive() {
       noDriverOrders: data.order?.id ? { ...(current.noDriverOrders || {}), [data.order.id]: data } : current.noDriverOrders,
       noCouriersNotice: data,
     }))
-    if (message.type === 'AI_DISPATCH_LOG') setLive((current) => ({ ...current, dispatch_log: data }))
+    if (message.type === 'AI_DISPATCH_LOG') setLive((current) => ({ ...current, dispatch_log: data, dispatch_history: [data, ...(current.dispatch_history || []).filter((item) => item.id !== data.id)].slice(0, 80) }))
     if (message.type === 'DRIVER_FINANCIAL_UPDATE') setLive((current) => ({
       ...current,
       financials: {
