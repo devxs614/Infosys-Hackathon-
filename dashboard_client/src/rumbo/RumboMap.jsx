@@ -7,13 +7,23 @@ import { monterreyCenter } from './data'
 // CARTO Dark Matter is intentionally keyless: every demo laptop can render it.
 const tileUrl = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
 const tileAttribution = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-const flaggedZones = [
-  { id: 99, center: [25.6814, -100.3218], area: [[25.6778, -100.329], [25.6778, -100.315], [25.685, -100.315], [25.685, -100.329]] },
-  { id: 13, center: [25.744, -100.351], area: [[25.739, -100.36], [25.739, -100.342], [25.749, -100.342], [25.749, -100.36]] },
-  { id: 15, center: [25.639, -100.286], area: [[25.635, -100.294], [25.635, -100.278], [25.643, -100.278], [25.643, -100.294]] },
-  { id: 22, center: [25.812, -100.322], area: [[25.806, -100.332], [25.806, -100.312], [25.818, -100.312], [25.818, -100.332]] },
-  { id: 31, center: [25.604, -100.184], area: [[25.599, -100.194], [25.599, -100.174], [25.609, -100.174], [25.609, -100.194]] },
+export const flaggedZones = [
+  { id: 99, name: 'Independencia', center: [25.6814, -100.3218], area: [[25.6778, -100.329], [25.6778, -100.315], [25.685, -100.315], [25.685, -100.329]] },
+  { id: 13, name: 'Topo Chico', center: [25.744, -100.351], area: [[25.739, -100.36], [25.739, -100.342], [25.749, -100.342], [25.749, -100.36]] },
+  { id: 15, name: 'La Campana', center: [25.639, -100.286], area: [[25.635, -100.294], [25.635, -100.278], [25.643, -100.278], [25.643, -100.294]] },
+  { id: 22, name: 'Escobedo North', center: [25.812, -100.322], area: [[25.806, -100.332], [25.806, -100.312], [25.818, -100.312], [25.818, -100.332]] },
+  { id: 31, name: 'Guadalupe East', center: [25.604, -100.184], area: [[25.599, -100.194], [25.599, -100.174], [25.609, -100.174], [25.609, -100.194]] },
 ]
+
+export function flaggedZoneAt(position) {
+  if (!position) return null
+  const [lat, lon] = position
+  return flaggedZones.find((zone) => {
+    const lats = zone.area.map(([value]) => value)
+    const lons = zone.area.map(([, value]) => value)
+    return lat >= Math.min(...lats) && lat <= Math.max(...lats) && lon >= Math.min(...lons) && lon <= Math.max(...lons)
+  }) || null
+}
 
 function icon(kind, bearing = 0) {
   const symbols = { pickup: '●', destination: '⌖', driver: '➤', flag: '🚩' }
@@ -139,6 +149,7 @@ function normalizeRoute(route, routeCoordinates) {
 export function RumboMap({
   className = '', origin, destination, route = [], routeCoordinates = 'lonlat', driver, drivers = [], orders = [],
   courierRoute = [], courierRouteCoordinates = 'lonlat', interactive = false, onDestinationChange, showBounds = true,
+  closurePinMode = false, onRoadClosure,
 }) {
   const originPoint = origin?.coords || origin
   const destinationPoint = destination?.coords || destination
@@ -160,9 +171,9 @@ export function RumboMap({
     <MapContainer center={destinationPoint || originPoint || monterreyCenter} zoom={12} scrollWheelZoom className="h-full w-full" zoomControl={false} attributionControl>
       <TileLayer url={tileUrl} attribution={tileAttribution} />
       {showBounds && <Bounds points={points} />}
-      {interactive && <ClickToPlace onChange={onDestinationChange} />}
-      {flaggedZones.map((zone) => <Polygon key={zone.id} positions={zone.area} pathOptions={{ color: '#ff0055', weight: 1.5, fillColor: '#ff0055', fillOpacity: .25, className: nightRestriction ? 'rumbo-risk-zone rumbo-risk-zone-active' : 'rumbo-risk-zone' }}><Tooltip direction="top" permanent={nightRestriction}>🚩 FLAGGED ZONE · {zone.id}</Tooltip></Polygon>)}
-      {flaggedZones.map((zone) => <Marker key={`flag-${zone.id}`} position={zone.center} icon={icon('flag')}><Tooltip direction="top" offset={[0, -12]}>🚩 FLAGGED ZONE · {zone.id}</Tooltip></Marker>)}
+      {(interactive || closurePinMode) && <ClickToPlace onChange={closurePinMode ? onRoadClosure : onDestinationChange} />}
+      {flaggedZones.map((zone) => <Polygon key={zone.id} positions={zone.area} pathOptions={{ color: '#ff0055', weight: 1.5, fillColor: '#ff0055', fillOpacity: .25, className: nightRestriction ? 'rumbo-risk-zone rumbo-risk-zone-active' : 'rumbo-risk-zone' }}><Tooltip direction="top" permanent={nightRestriction}>🚩 Zone {zone.id} · {zone.name}</Tooltip></Polygon>)}
+      {flaggedZones.map((zone) => <Marker key={`flag-${zone.id}`} position={zone.center} icon={icon('flag')}><Tooltip direction="top" offset={[0, -12]} permanent>🚩 Zone {zone.id} · {zone.name}</Tooltip></Marker>)}
       {courierLine.length > 1 && <>
         {courierSplit.completed.length > 1 && <Polyline positions={courierSplit.completed} pathOptions={{ color: '#94a3b8', weight: 6, opacity: .32, lineCap: 'round' }} />}
         {courierSplit.pending.length > 1 && <><Polyline positions={courierSplit.pending} pathOptions={{ color: '#f59e0b', weight: 10, opacity: .15, lineCap: 'round', dashArray: '4 10' }} /><Polyline positions={courierSplit.pending} pathOptions={{ color: '#fbbf24', weight: 4, opacity: .96, lineCap: 'round', dashArray: '4 10' }} /></>}
@@ -179,6 +190,7 @@ export function RumboMap({
     </MapContainer>
     {protocolState.shock === 'rain' && <div className="protocol-rain pointer-events-none absolute inset-0 z-[450]" />}
     {(protocolState.shock === 'closure' || protocolState.shock === 'delay') && <div className="protocol-closure pointer-events-none absolute inset-0 z-[450]" />}
+    {closurePinMode && <div className="pointer-events-none absolute left-1/2 top-5 z-[520] -translate-x-1/2 rounded-2xl border border-rose-300/45 bg-[#170a12]/90 px-4 py-2 text-xs font-medium text-rose-100 backdrop-blur">Pin Road Closure: click an avenue on the map</div>}
     <div className="pointer-events-none absolute bottom-4 left-4 z-[500] rounded-xl border border-white/10 bg-black/55 px-3 py-2 text-[9px] font-semibold tracking-[.16em] text-cyan/90 backdrop-blur">{courierLine.length > 1 ? 'ÁMBAR · COURIER → TIENDA  ·  VIOLETA · TIENDA → CLIENTE' : 'MONTERREY · LIVE STREET GRAPH'}</div>
   </div>
 }

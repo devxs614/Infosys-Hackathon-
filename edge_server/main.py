@@ -16,6 +16,7 @@ from edge_server.logging_config import configure_logging
 from edge_server.live_order_service import LiveOrderCoordinator
 from edge_server.routing.routing_engine import RoutingEngine
 from edge_server.simulation.simulation_engine import SimulationEngine
+from edge_server.simulation.control_state import SimulationControlState
 from edge_server.websocket_manager import ConnectionManager
 
 
@@ -34,6 +35,9 @@ def create_app() -> FastAPI:
         app.state.engine = SimulationEngine(settings, telemetry, app.state.connections.broadcast)
         app.state.routing = RoutingEngine(settings.osrm_url, settings.use_osrm)
         app.state.live_orders = LiveOrderCoordinator(app.state.engine.gemini_agent, app.state.routing)
+        # The Pi owns this mutable live-demo state.  Browser clocks are views of
+        # it and receive it only through TIME_SYNC_UPDATE frames.
+        app.state.protocol_state = SimulationControlState()
         app.state.decision_explanations = {}
         app.state.decision_degraded = False
         telemetry_stop = asyncio.Event()
@@ -41,7 +45,12 @@ def create_app() -> FastAPI:
         async def advance_live_mesh() -> None:
             while not telemetry_stop.is_set():
                 await asyncio.sleep(0.5)
-                updates = await app.state.live_orders.advance(0.5)
+                advanced_control = await app.state.protocol_state.advance(0.5)
+                control = advanced_control or await app.state.protocol_state.snapshot()
+                updates = await app.state.live_orders.advance(0.5, simulated_minutes=control["simulated_minutes"])
+                await app.state.live_orders.apply_control_state(control)
+                if advanced_control:
+                    await app.state.connections.broadcast("TIME_SYNC_UPDATE", control)
                 for update in updates:
                     await app.state.connections.broadcast("DRIVER_TELEMETRY", update)
                     await app.state.connections.broadcast("DRIVER_FINANCIAL_UPDATE", app.state.live_orders.driver_financial_update(update["driver_id"]))

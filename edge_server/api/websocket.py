@@ -26,6 +26,7 @@ async def simulation_websocket(websocket: WebSocket) -> None:
         await manager.send(websocket, "connection", {"status": "connected", "transport": "websocket"})
         await manager.send(websocket, "hello_response", {"service": "Rumbo | Edge Logistics OS", "state": websocket.app.state.engine.state().model_dump(mode="json")})
         await manager.send(websocket, "live_order_state", websocket.app.state.live_orders.snapshot())
+        await manager.send(websocket, "TIME_SYNC_UPDATE", await websocket.app.state.protocol_state.snapshot())
         while True:
             message = await websocket.receive_json()
             message_type = message.get("type")
@@ -46,7 +47,12 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                         await manager.send(websocket, "error", {"message": "Set a Monterrey starting location before going online"})
                         continue
                     await manager.bind_user(websocket, identity["id"])
-                    registration = await websocket.app.state.live_orders.register_user({**identity, "location": payload.get("location")})
+                    registration = await websocket.app.state.live_orders.register_user({
+                        **identity, "location": payload.get("location"),
+                        "shift_start_minute": payload.get("shift_start_minute"),
+                        "shift_end_minute": payload.get("shift_end_minute"),
+                        "vehicle_profile": payload.get("vehicle_profile"),
+                    })
                     await manager.broadcast("USER_REGISTERED", registration)
                     if registration.get("driver"):
                         await manager.broadcast("DRIVER_ONLINE", {"driver": registration["driver"], "metrics": registration["metrics"]})
@@ -58,13 +64,25 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                             await manager.broadcast("AI_DISPATCH_LOG", websocket.app.state.live_orders.dispatch_log)
                         await manager.broadcast("DRIVER_FINANCIAL_UPDATE", websocket.app.state.live_orders.driver_financial_update(registration["driver"]["id"]))
                     await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())
-                except ValidationError as exc:
-                    await manager.send(websocket, "error", {"message": "Invalid REGISTER_USER", "details": _validation_details(exc)})
+                except (ValidationError, ValueError) as exc:
+                    details = _validation_details(exc) if isinstance(exc, ValidationError) else None
+                    await manager.send(websocket, "error", {"message": "Invalid REGISTER_USER" if details else str(exc), **({"details": details} if details else {})})
                 continue
 
             identity = await _identity(websocket, payload)
             if not identity:
                 await manager.send(websocket, "error", {"message": "Authenticate with /api/auth before using the live session"})
+                continue
+
+            if message_type == "TIME_SYNC_UPDATE":
+                if identity["role"] != "admin":
+                    await manager.send(websocket, "error", {"message": "Only Command Center can change the shared simulation clock"})
+                    continue
+                state = await websocket.app.state.protocol_state.update_time({
+                    key: payload[key] for key in ("simulated_minutes", "paused") if key in payload
+                })
+                await websocket.app.state.live_orders.apply_control_state(state)
+                await manager.broadcast("TIME_SYNC_UPDATE", state)
                 continue
 
             if message_type == "NEW_ORDER":
@@ -123,10 +141,17 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                         await manager.send(websocket, "error", {"message": "No live assignment is available"})
                         continue
                     await manager.broadcast("DRIVER_ACTION", {"action": payload.get("action"), "batch": batch.model_dump(mode="json") if batch else None, "orders": websocket.app.state.live_orders.snapshot()["orders"]})
-                    for order in orders:
-                        match = websocket.app.state.live_orders.order_match_payload(order)
-                        if match:
-                            await manager.broadcast("ORDER_MATCHED", match)
+                    if payload.get("action") == "DECLINE_ASSIGNMENT":
+                        for order in orders:
+                            dispatch = websocket.app.state.live_orders.order_dispatch_payload(order)
+                            if dispatch:
+                                await manager.send_to_user(order.driver_id, "ORDER_DISPATCHED", dispatch)
+                                await manager.broadcast("ORDER_REASSIGNED", dispatch)
+                    else:
+                        for order in orders:
+                            match = websocket.app.state.live_orders.order_match_payload(order)
+                            if match:
+                                await manager.broadcast("ORDER_MATCHED", match)
                     await manager.broadcast("DRIVER_FINANCIAL_UPDATE", websocket.app.state.live_orders.driver_financial_update(identity["id"]))
                     await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())
                 except (ValidationError, ValueError) as exc:

@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Clock3, Download, FilePlay, Gauge, Pause, Play, ShieldAlert, Upload } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { decisionApi, demoApi } from '../services/api'
 import { GlassCard } from './GlassCard'
 
@@ -11,7 +11,6 @@ export const vehicleProfiles = {
 }
 
 const defaultConfiguration = { seed: 42, shift_hours: 8.5, vehicle: 'moto', start_location_zone: 5 }
-const minutesPerClockSecond = .25 // 2 real minutes = 30 simulated minutes.
 
 function formatClock(totalMinutes) {
   const normalized = ((Math.round(totalMinutes) % 1440) + 1440) % 1440
@@ -35,23 +34,33 @@ export function useProtocolShift() {
   const [shock, setShock] = useState(null)
   const [replay, setReplay] = useState(null)
   const [driverVehicles, setDriverVehicles] = useState({})
+  const [closurePinMode, setClosurePinMode] = useState(false)
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (!paused) setSimulatedMinutes((current) => current + minutesPerClockSecond)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [paused])
+    let active = true
+    demoApi.timeSync().then((state) => {
+      if (!active) return
+      setSimulatedMinutes(state.simulated_minutes)
+      setPaused(Boolean(state.paused))
+      setShock(state.shock || null)
+    }).catch(() => {})
+    return () => { active = false }
+  }, [])
 
   useEffect(() => {
     broadcastVisualState({ simulatedMinutes, shock, vehicle: configuration.vehicle })
   }, [configuration.vehicle, shock, simulatedMinutes])
 
+  const applyServerState = useCallback((state) => {
+    if (!state || typeof state.simulated_minutes !== 'number') return
+    setSimulatedMinutes(state.simulated_minutes)
+    setPaused(Boolean(state.paused))
+    setShock(state.shock || null)
+  }, [])
+
   const configure = async (nextConfiguration) => {
     const normalized = { ...nextConfiguration, seed: Number(nextConfiguration.seed), shift_hours: Number(nextConfiguration.shift_hours), start_location_zone: Number(nextConfiguration.start_location_zone) }
     setConfiguration(normalized)
-    setSimulatedMinutes(14 * 60)
-    setPaused(true)
     try {
       const response = await demoApi.configure(normalized)
       return { ok: true, config: response.config }
@@ -70,15 +79,54 @@ export function useProtocolShift() {
     broadcastVisualState({ simulatedMinutes, shock, vehicle })
   }
 
+  const syncTime = useCallback(async (next) => {
+    const state = await demoApi.updateTimeSync(next)
+    applyServerState(state)
+    return state
+  }, [applyServerState])
+
+  const setServerMinutes = useCallback((time) => {
+    const simulated_minutes = typeof time === 'number' ? time : timeToMinutes(time)
+    return syncTime({ simulated_minutes })
+  }, [syncTime])
+
+  const setServerPaused = useCallback((next) => syncTime({ paused: next }), [syncTime])
+
+  const triggerShock = useCallback(async (kind, zone = null) => {
+    const state = await demoApi.shock({ shock: kind, zone })
+    applyServerState(state)
+    return state
+  }, [applyServerState])
+
+  const pinRoadClosure = useCallback(async (position, label) => {
+    const state = await demoApi.pinRoadClosure({ position, label })
+    applyServerState(state)
+    setClosurePinMode(false)
+    return state
+  }, [applyServerState])
+
+  const delayDriver = useCallback(async (driver_id, minutes = 15) => {
+    const response = await demoApi.delayDriver({ driver_id, minutes })
+    applyServerState(response.control)
+    return response
+  }, [applyServerState])
+
+  const onSocketMessage = useCallback((message) => {
+    if (message.type === 'TIME_SYNC_UPDATE') applyServerState(message.data)
+  }, [applyServerState])
+
+  const launchFullDemo = useCallback(() => demoApi.launchFullAutonomousDemo(), [])
+
   return {
     configuration, simulatedMinutes, clock: formatClock(simulatedMinutes), paused, degraded, shock, replay, driverVehicles,
-    setPaused, setSimulatedMinutes: (time) => setSimulatedMinutes(typeof time === 'number' ? time : timeToMinutes(time)),
-    configure, toggleDegraded, setShock, setReplay, selectVehicle,
+    closurePinMode, setClosurePinMode,
+    setPaused: setServerPaused, setSimulatedMinutes: setServerMinutes,
+    configure, toggleDegraded, setShock: triggerShock, setReplay, selectVehicle, triggerShock, pinRoadClosure, delayDriver, launchFullDemo, onSocketMessage,
   }
 }
 
 export function ProtocolShiftClock({ protocol }) {
-  return <div className="protocol-clock fixed right-5 top-5 z-[1400] hidden items-center gap-3 rounded-2xl border border-cyan/25 bg-[#09090b]/90 px-3 py-2 shadow-2xl backdrop-blur-xl sm:flex"><Clock3 size={15} className="text-cyan" /><div><p className="text-[9px] font-semibold tracking-[.17em] text-white/45">SHIFT CLOCK · 15×</p><p className="font-mono text-sm font-semibold tracking-[.12em] text-cyan">{protocol.clock}</p></div><span className={`h-2 w-2 rounded-full ${protocol.paused ? 'bg-amber-300' : 'animate-pulse bg-emerald-300'}`} /></div>
+  return <div className="protocol-clock pointer-events-none fixed left-1/2 top-3 z-[60] hidden -translate-x-1/2 items-center gap-3 rounded-2xl border border-cyan/25 bg-[#09090b]/90 px-3 py-2 shadow-2xl backdrop-blur-xl lg:flex"><Clock3 size={15} className="text-cyan" /><div><p className="text-[9px] font-semibold tracking-[.17em] text-white/45">SHIFT CLOCK · 15×</p><p className="font-mono text-sm font-semibold tracking-[.12em] text-cyan">{protocol.clock}</p></div><span className={`h-2 w-2 rounded-full ${protocol.paused ? 'bg-amber-300' : 'animate-pulse bg-emerald-300'}`} /></div>
 }
 
 export function JudgesControlPanel({ protocol }) {
@@ -155,7 +203,7 @@ export function DriverVehicleSelector({ profile, live, protocol }) {
   return <AnimatePresence>{!selected && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[1450] grid place-items-center bg-black/70 p-5 backdrop-blur-md"><motion.div initial={{ y: 24, scale: .97 }} animate={{ y: 0, scale: 1 }} className="w-full max-w-2xl rounded-[2rem] border border-white/10 bg-[#101522]/95 p-6 shadow-2xl"><p className="eyebrow">SHIFT VEHICLE PROFILE</p><h2 className="mt-2 text-2xl font-semibold">Choose your vehicle before going online.</h2><p className="mt-2 text-sm text-white/55">Capacity limits and visible map physics will follow this profile for this courier session.</p><div className="mt-6 grid gap-3 sm:grid-cols-3">{Object.entries(vehicleProfiles).map(([key, vehicle]) => <button key={key} onClick={() => protocol.selectVehicle(profile.id, key)} className="rounded-3xl border border-white/10 bg-white/[.04] p-5 text-left transition hover:-translate-y-1 hover:border-cyan/50 hover:bg-cyan/10"><span className="text-3xl">{vehicle.icon}</span><p className="mt-4 font-semibold">{vehicle.label}</p><p className="mt-2 text-xs text-cyan">{vehicle.speed} km/h</p><p className="mt-1 text-[10px] leading-4 text-white/45">{vehicle.weight} kg · {vehicle.volume} L capacity</p></button>)}</div></motion.div></motion.div>}{exceeded && <motion.div initial={{ opacity: 0, scale: .94 }} animate={{ opacity: 1, scale: 1 }} className="fixed inset-0 z-[1460] grid place-items-center bg-rose-950/70 p-5 backdrop-blur-md"><div className="w-full max-w-md rounded-[2rem] border border-rose-400/60 bg-[#260d19] p-7 shadow-[0_0_80px_rgba(255,0,85,.35)]"><ShieldAlert size={38} className="text-rose-300" /><h2 className="mt-5 text-2xl font-semibold">🚫 VEHICLE CAPACITY EXCEEDED</h2><p className="mt-3 text-sm leading-6 text-rose-100/75">Weight/Volume exceeds limits for the selected {limits.label} profile.</p></div></motion.div>}</AnimatePresence>
 }
 
-export function JudgeDashboardDock({ protocol, onTrigger }) {
+function LegacyJudgeDashboardDock({ protocol, onTrigger }) {
   const [decisionId, setDecisionId] = useState('PP-004')
   const [explanation, setExplanation] = useState(null)
   const continuousRiding = Math.max(0, protocol.simulatedMinutes - 14 * 60)
@@ -171,4 +219,41 @@ export function JudgeDashboardDock({ protocol, onTrigger }) {
     try { setExplanation(await decisionApi.explain(decisionId)) } catch { setExplanation({ reason: 'No stored decision log for this order id yet.' }) }
   }
   return <aside className="protocol-dashboard-dock fixed bottom-5 right-5 z-[1200] w-[min(24rem,calc(100vw-2.5rem))]"><GlassCard className="max-h-[76vh] overflow-y-auto p-5"><div className="flex items-start justify-between"><div><p className="eyebrow">TIME MACHINE · 15×</p><h2 className="mt-1 text-lg font-semibold">{protocol.clock}</h2></div><button onClick={() => protocol.setPaused(!protocol.paused)} className="app-button px-3 py-2">{protocol.paused ? <Play size={15} /> : <Pause size={15} />}</button></div><div className="mt-3 flex flex-wrap gap-2">{['13:30', '15:41', '20:20', '22:05', '22:16'].map((time) => <button key={time} onClick={() => protocol.setSimulatedMinutes(time)} className="rounded-xl border border-white/10 px-2.5 py-1.5 text-[10px] text-white/65 hover:border-cyan/50">{time}</button>)}</div><div className="mt-5 border-t border-white/10 pt-4"><p className="text-[10px] font-semibold tracking-[.14em] text-white/45">INJECT SHOCK</p><div className="mt-2 grid grid-cols-2 gap-2">{['surge', 'closure', 'rain', 'delay'].map((kind) => <button key={kind} onClick={() => triggerShock(kind)} className="app-button px-2 py-2 text-xs capitalize">{kind}</button>)}</div></div><button onClick={() => protocol.toggleDegraded(!protocol.degraded)} className={`mt-4 flex w-full items-center justify-between rounded-2xl border p-3 text-left text-xs ${protocol.degraded ? 'border-amber-300/50 bg-amber-300/15 text-amber-100' : 'border-white/10 bg-white/[.04] text-white/65'}`}><span>Kill LLM Connection</span><span className="font-semibold">{protocol.degraded ? 'ON' : 'OFF'}</span></button>{protocol.degraded && <div className="mt-3 flex gap-2 rounded-2xl border border-amber-300/35 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100"><AlertTriangle size={16} className="mt-0.5 shrink-0" />⚠️ DEGRADED MODE: Fast-path autonomous fallback active</div>}<div className="mt-5 border-t border-white/10 pt-4"><p className="text-[10px] font-semibold tracking-[.14em] text-white/45">DECISION LOGS</p><div className="mt-2 flex gap-2"><input value={decisionId} onChange={(event) => setDecisionId(event.target.value)} className="rumbo-input py-2 text-xs" aria-label="Decision order id" /><button onClick={loadExplanation} className="app-button px-3 py-2"><Gauge size={15} /></button></div>{explanation && <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-3 text-xs leading-5 text-white/60"><b className="text-white">{explanation.decision || 'LOG'}</b> · {explanation.reason}</div>}</div></GlassCard><AnimatePresence>{(heatActive || mandatoryBreak || shiftEndRisk) && <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3 rounded-2xl border border-rose-400/40 bg-rose-500/15 p-4 text-xs leading-5 text-rose-100">{mandatoryBreak ? '🛑 MANDATORY BREAK — 4 continuous hours reached.' : heatActive ? '🔥 HEAT RULE ACTIVE — Cooling period required.' : '⌛ SHIFT END INFEASIBLE — Verify ETA before accepting.'}</motion.div>}</AnimatePresence></aside>
+}
+
+/** Compact by default so it never covers the map, AI verdict, or header actions. */
+export function JudgeDashboardDock({ protocol, drivers = [] }) {
+  const [open, setOpen] = useState(false)
+  const [decisionId, setDecisionId] = useState('PP-004')
+  const [explanation, setExplanation] = useState(null)
+  const [delayDriverId, setDelayDriverId] = useState('')
+  const [notice, setNotice] = useState('')
+  const continuousRiding = Math.max(0, protocol.simulatedMinutes - 14 * 60)
+  const heatActive = protocol.simulatedMinutes >= 12 * 60 && protocol.simulatedMinutes <= 16 * 60 && continuousRiding > 90
+  const mandatoryBreak = continuousRiding >= 240
+  const shiftEndRisk = protocol.simulatedMinutes >= 22 * 60 + 15
+  const loadExplanation = async () => {
+    try { setExplanation(await decisionApi.explain(decisionId)) } catch { setExplanation({ reason: 'No stored decision log for this order id yet.' }) }
+  }
+  const setTime = async (event) => {
+    try { await protocol.setSimulatedMinutes(event.target.value) } catch { setNotice('The Pi could not update the shared clock.') }
+  }
+  const injectShock = async (kind) => {
+    try {
+      if (kind === 'closure') {
+        protocol.setClosurePinMode(true)
+        setNotice('Click an avenue on the map to pin the road closure.')
+      } else if (kind === 'delay') {
+        if (!delayDriverId) return setNotice('Select an active courier before applying a delay.')
+        await protocol.delayDriver(delayDriverId, 15)
+        setNotice('The selected courier is DECAY / DELAYED for 15 simulated minutes.')
+      } else {
+        await protocol.triggerShock(kind)
+        setNotice(`${kind[0].toUpperCase() + kind.slice(1)} was synchronized from the Pi to every connected laptop.`)
+      }
+    } catch (error) { setNotice(error.message || 'The Pi could not apply this control.') }
+  }
+  return <aside className="protocol-dashboard-dock fixed bottom-5 right-5 z-[55] w-[min(22rem,calc(100vw-2.5rem))]">
+    {!open && <button onClick={() => setOpen(true)} className="glass flex w-full items-center justify-between rounded-2xl px-4 py-3 text-left text-xs shadow-2xl"><span><b className="block text-cyan">TIME MACHINE · {protocol.clock}</b><span className="mt-1 block text-white/45">Shared Pi controls</span></span><Gauge size={18} className="text-cyan" /></button>}
+    <AnimatePresence>{open && <motion.div initial={{ opacity: 0, y: 12, scale: .98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 12, scale: .98 }} className="max-h-[68vh] overflow-y-auto rounded-[1.5rem] border border-white/10 bg-slate-900/90 p-5 shadow-2xl backdrop-blur-md"><div className="flex items-start justify-between"><div><p className="eyebrow">TIME MACHINE · 15×</p><h2 className="mt-1 text-lg font-semibold">{protocol.clock}</h2></div><div className="flex gap-2"><button onClick={() => protocol.setPaused(!protocol.paused)} className="app-button px-3 py-2">{protocol.paused ? <Play size={15} /> : <Pause size={15} />}</button><button onClick={() => setOpen(false)} className="app-button px-3 py-2">×</button></div></div><label className="mt-4 block"><span className="mb-1 block text-[10px] tracking-[.14em] text-white/45">SHARED SIMULATION TIME</span><select value={protocol.clock} onChange={setTime} className="rumbo-input py-2 text-sm"><option>13:30</option><option>15:41</option><option>20:20</option><option>22:05</option><option>22:16</option></select></label><div className="mt-5 border-t border-white/10 pt-4"><p className="text-[10px] font-semibold tracking-[.14em] text-white/45">INJECT SHOCK</p><div className="mt-2 grid grid-cols-2 gap-2"><button onClick={() => injectShock('surge')} className="app-button px-2 py-2 text-xs">Surge</button><button onClick={() => injectShock('closure')} className={`app-button px-2 py-2 text-xs ${protocol.closurePinMode ? 'border-rose-300/50 bg-rose-500/15 text-rose-100' : ''}`}>Closure</button><button onClick={() => injectShock('rain')} className="app-button px-2 py-2 text-xs">Rain</button><button onClick={() => injectShock('delay')} className="app-button px-2 py-2 text-xs">Delay</button></div><select value={delayDriverId} onChange={(event) => setDelayDriverId(event.target.value)} className="rumbo-input mt-2 py-2 text-xs"><option value="">Select courier for delay</option>{drivers.filter((driver) => driver.online).map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}</select></div><button onClick={() => protocol.toggleDegraded(!protocol.degraded)} className={`mt-4 flex w-full items-center justify-between rounded-2xl border p-3 text-left text-xs ${protocol.degraded ? 'border-amber-300/50 bg-amber-300/15 text-amber-100' : 'border-white/10 bg-white/[.04] text-white/65'}`}><span>Kill LLM Connection</span><span className="font-semibold">{protocol.degraded ? 'ON' : 'OFF'}</span></button>{protocol.degraded && <div className="mt-3 flex gap-2 rounded-2xl border border-amber-300/35 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100"><AlertTriangle size={16} className="mt-0.5 shrink-0" />⚠️ DEGRADED MODE: Fast-path autonomous fallback active</div>}<div className="mt-5 border-t border-white/10 pt-4"><p className="text-[10px] font-semibold tracking-[.14em] text-white/45">DECISION LOGS</p><div className="mt-2 flex gap-2"><input value={decisionId} onChange={(event) => setDecisionId(event.target.value)} className="rumbo-input py-2 text-xs" aria-label="Decision order id" /><button onClick={loadExplanation} className="app-button px-3 py-2"><Gauge size={15} /></button></div>{explanation && <div className="mt-3 max-h-32 overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-3 text-xs leading-5 text-white/60"><b className="text-white">{explanation.decision || 'LOG'}</b> · {explanation.reason}</div>}</div>{notice && <p className="mt-4 rounded-xl border border-cyan/20 bg-cyan/10 p-3 text-xs leading-5 text-cyan">{notice}</p>}</motion.div>}</AnimatePresence><AnimatePresence>{(heatActive || mandatoryBreak || shiftEndRisk) && <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3 rounded-2xl border border-rose-400/40 bg-rose-500/15 p-4 text-xs leading-5 text-rose-100">{mandatoryBreak ? '🛑 MANDATORY BREAK — 4 continuous hours reached.' : heatActive ? '🔥 HEAT RULE ACTIVE — Cooling period required.' : '⌛ SHIFT END INFEASIBLE — Verify ETA before accepting.'}</motion.div>}</AnimatePresence></aside>
 }

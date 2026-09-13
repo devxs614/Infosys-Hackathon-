@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useWebSocket } from './hooks/useWebSocket'
 import { ClientExperience, NoCouriersModal } from './rumbo/ClientExperience'
 import { ClientAssignmentModal } from './rumbo/ClientAssignmentModal'
@@ -82,18 +82,22 @@ function RouteScene({ path, query, navigate, liveState, socket, profile, onAuthe
   if (path === '/app/client' && profile?.role === 'client') {
     const clientOrder = [...(liveState.live.orders || [])].reverse().find((order) => order.client_id === profile.id && ['PENDING', 'MATCHED', 'IN_TRANSIT'].includes(order.status))
     const assignment = clientOrder ? liveState.live.orderMatches?.[clientOrder.id] : null
-    return <><ClientExperience profile={profile} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} /><ClientAssignmentModal assignment={assignment} /><NoCouriersModal notice={liveState.live.noCouriersNotice} onDismiss={liveState.dismissNoCouriersNotice} /></>
+    return <><ClientExperience profile={profile} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} protocol={protocol} /><ClientAssignmentModal assignment={assignment} /><NoCouriersModal notice={liveState.live.noCouriersNotice} onDismiss={liveState.dismissNoCouriersNotice} /></>
   }
-  if (path === '/app/driver' && profile?.role === 'driver') return <><DriverHUD profile={profile} live={liveState.live} notification={liveState.driverNotifications?.[profile.id] || liveState.notification} onDismiss={() => liveState.dismissNotification(profile.id)} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} /><DriverVehicleSelector profile={profile} live={liveState.live} protocol={protocol} /></>
-  if (path === '/app/dashboard') return <><CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} /><JudgeDashboardDock protocol={protocol} onTrigger={liveState.trigger} /></>
-  return <Landing onAuthenticated={onAuthenticated} protocol={protocol} />
+  if (path === '/app/driver' && profile?.role === 'driver') return <><DriverHUD profile={profile} live={liveState.live} notification={liveState.driverNotifications?.[profile.id] || liveState.notification} onDismiss={() => liveState.dismissNotification(profile.id)} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} vehicleProfile={protocol.driverVehicles[profile.id]} /><DriverVehicleSelector profile={profile} live={liveState.live} protocol={protocol} /></>
+  if (path === '/app/dashboard') return <><CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} protocol={protocol} /><JudgeDashboardDock protocol={protocol} onTrigger={liveState.trigger} drivers={liveState.live.drivers || []} /></>
+  return <Landing onAuthenticated={onAuthenticated} protocol={protocol} onLaunchFullDemo={protocol.launchFullDemo} />
 }
 
 export default function App() {
   const route = useRumboRoute()
   const liveState = useRumboLive()
-  const socket = useWebSocket(liveState.onMessage)
   const protocol = useProtocolShift()
+  const onSocketMessage = useCallback((message) => {
+    liveState.onMessage(message)
+    protocol.onSocketMessage(message)
+  }, [liveState.onMessage, protocol.onSocketMessage])
+  const socket = useWebSocket(onSocketMessage)
   const [profile, setProfile] = useState(readSession)
   useEffect(() => {
     if (socket.status !== 'connected' || !profile?.session_token) return undefined

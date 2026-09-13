@@ -55,6 +55,8 @@ export function useRumboLive() {
     if (message.type === 'USER_REGISTERED') setLive((current) => ({ ...current, users: [...(current.users || []).filter((user) => user.id !== data.user?.id), data.user], metrics: data.metrics || current.metrics }))
     if (message.type === 'DRIVER_ONLINE') setLive((current) => ({ ...current, drivers: [...(current.drivers || []).filter((driver) => driver.id !== data.driver?.id), data.driver], metrics: data.metrics || current.metrics }))
     if (message.type === 'DRIVER_OFFLINE') setLive((current) => ({ ...current, drivers: (current.drivers || []).filter((driver) => driver.id !== data.driver?.id), metrics: data.metrics || current.metrics }))
+    if (message.type === 'DRIVER_DELAYED') setLive((current) => ({ ...current, drivers: [...(current.drivers || []).filter((driver) => driver.id !== data.driver?.id), ...(data.driver ? [data.driver] : [])] }))
+    if (message.type === 'ORDER_REASSIGNED') setLive((current) => ({ ...current, orders: [...(current.orders || []).filter((order) => order.id !== data.order?.id), data.order] }))
     if (message.type === 'DRIVER_TELEMETRY') setLive((current) => ({ ...current, telemetry: { ...(current.telemetry || {}), [data.driver_id]: data } }))
     if (message.type === 'LIVE_METRICS') setLive((current) => ({ ...current, metrics: data }))
     if (message.type === 'error') setError(data.message || 'Rumbo Edge reportó un error.')

@@ -20,6 +20,12 @@ export const demoApi = {
   trigger: (event_type) => request('/demo/trigger', { method: 'POST', body: JSON.stringify({ event_type }) }),
   configure: (data) => request('/protocol/shift-config', { method: 'POST', body: JSON.stringify(data) }),
   setDegraded: (enabled) => request('/protocol/degraded', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  timeSync: () => request('/protocol/time-sync'),
+  updateTimeSync: (data) => request('/protocol/time-sync', { method: 'POST', body: JSON.stringify(data) }),
+  shock: (data) => request('/protocol/shock', { method: 'POST', body: JSON.stringify(data) }),
+  pinRoadClosure: (data) => request('/protocol/road-closure', { method: 'POST', body: JSON.stringify(data) }),
+  delayDriver: (data) => request('/protocol/driver-delay', { method: 'POST', body: JSON.stringify(data) }),
+  launchFullAutonomousDemo: () => request('/protocol/full-autonomous-demo', { method: 'POST' }),
 }
 
 export const decisionApi = {

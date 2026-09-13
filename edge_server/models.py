@@ -253,6 +253,9 @@ class LiveOrderRequest(BaseModel):
     destination_label: str = Field(default="Destino Monterrey", min_length=2, max_length=160)
     location: list[float] | None = Field(default=None, min_length=2, max_length=2)
     items: list[dict[str, Any]] = Field(min_length=1, max_length=30)
+    tip_mxn: float = Field(default=0, ge=0, le=500)
+    weight_kg: float | None = Field(default=None, gt=0, le=200)
+    volume_liters: float | None = Field(default=None, gt=0, le=500)
 
     @field_validator("origin", "destination", "location")
     @classmethod
@@ -274,6 +277,7 @@ class DriverActionRequest(BaseModel):
     action: Literal[
         "ACCEPT_BATCH", "ARRIVED_RESTAURANT", "DELIVERED_CLIENT_1", "DELIVERED_CLIENT_2",
         "ACCEPT_ASSIGNMENT", "START_DELIVERY", "DELIVERED",
+        "DECLINE_ASSIGNMENT",
     ]
     driver_id: str | None = Field(default=None, min_length=3, max_length=100)
     order_id: str | None = Field(default=None, min_length=3, max_length=100)
@@ -318,6 +322,10 @@ class LiveOrder(BaseModel):
     delivery_fee_mxn: float = 0
     courier_payout_mxn: float = 0
     platform_commission_mxn: float = 0
+    tip_mxn: float = 0
+    weight_kg: float = 1.0
+    volume_liters: float = 1.0
+    declined_driver_ids: list[str] = Field(default_factory=list)
     route_geometry: list[list[float]] = Field(default_factory=list)
     courier_route_geometry: list[list[float]] = Field(default_factory=list)
     courier_distance_km: float = 0

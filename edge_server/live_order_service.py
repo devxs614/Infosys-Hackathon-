@@ -31,6 +31,30 @@ CONGESTION_ZONES = {
     "San Pedro": ([25.6500, -100.3500], 2.7, 2.2),
     "Gonzalitos": ([25.6900, -100.3660], 2.4, 2.3),
 }
+FLAGGED_ZONE_BOUNDS = {
+    99: (25.6778, 25.6850, -100.3290, -100.3150),
+    13: (25.7390, 25.7490, -100.3600, -100.3420),
+    15: (25.6350, 25.6430, -100.2940, -100.2780),
+    22: (25.8060, 25.8180, -100.3320, -100.3120),
+    31: (25.5990, 25.6090, -100.1940, -100.1740),
+}
+VEHICLE_CAPACITY = {
+    "moto": (20.0, 20.0),
+    "car": (150.0, 200.0),
+    "bike": (8.0, 12.0),
+}
+
+
+def _flagged_zone_id(position: list[float]) -> int | None:
+    lat, lon = position
+    for zone_id, (min_lat, max_lat, min_lon, max_lon) in FLAGGED_ZONE_BOUNDS.items():
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            return zone_id
+    return None
+
+
+def _minutes_in_day(value: float) -> float:
+    return value % (24 * 60)
 
 
 class NoDriversAvailableError(ValueError):
@@ -65,9 +89,11 @@ class LiveOrderCoordinator:
         self.dispatch_log: dict | None = None
         self._counter = 0
         self._batch_counter = 0
-        self.simulation_minutes = 0.0
+        self.simulation_minutes = 14 * 60.0
         self.traffic = TrafficState()
         self.weather = WeatherState()
+        self.road_closures: list[dict] = []
+        self.surge_multiplier = 1.0
         self._lock = asyncio.Lock()
 
     def _metrics(self) -> dict:
@@ -97,7 +123,13 @@ class LiveOrderCoordinator:
             "assigned_order_ids": driver.get("assigned_order_ids", []),
             "vehicle": driver.get("vehicle"),
             "avatar_url": driver.get("avatar_url"),
-            "status": status,
+            "status": driver.get("status", status),
+            "shift_start_minute": driver.get("shift_start_minute"),
+            "shift_end_minute": driver.get("shift_end_minute"),
+            "continuous_riding_minutes": round(driver.get("continuous_riding_minutes", 0), 1),
+            "break_until_minute": driver.get("break_until_minute"),
+            "delay_until_minute": driver.get("delay_until_minute"),
+            "heat_rule_alert": bool(driver.get("heat_rule_alert")),
             "updated_at": driver.get("updated_at"),
         }
 
@@ -206,6 +238,12 @@ class LiveOrderCoordinator:
             if request.role == "driver":
                 current = self.drivers.get(request.id, {})
                 position = request.location or current.get("position")
+                requested_start = payload.get("shift_start_minute")
+                shift_start = float(_minutes_in_day(self.simulation_minutes) if requested_start is None else requested_start)
+                requested_end = payload.get("shift_end_minute")
+                shift_end = float(shift_start + 240 if requested_end is None else requested_end)
+                if not shift_start < shift_end <= 24 * 60 or shift_end - shift_start > 240:
+                    raise ValueError("Courier shifts must be between 1 minute and 4 hours within the same day")
                 self.drivers[request.id] = {
                     "id": request.id,
                     "name": request.name,
@@ -219,9 +257,18 @@ class LiveOrderCoordinator:
                     "street_name": current.get("street_name"),
                     "assigned_order_ids": current.get("assigned_order_ids", []),
                     "vehicle": request.vehicle,
+                    "vehicle_profile": payload.get("vehicle_profile", current.get("vehicle_profile")),
                     "avatar_url": request.avatar_url,
+                    "shift_start_minute": shift_start,
+                    "shift_end_minute": shift_end,
+                    "continuous_riding_minutes": current.get("continuous_riding_minutes", 0.0),
+                    "break_until_minute": current.get("break_until_minute"),
+                    "delay_until_minute": current.get("delay_until_minute"),
+                    "heat_rule_alert": False,
+                    "status": "ONLINE",
                     "updated_at": _utc_now(),
                 }
+                self._refresh_driver_status(self.drivers[request.id])
                 # A real courier coming online may receive pending central orders.
                 for batch in self.batches.values():
                     if batch.driver_id:
@@ -244,6 +291,8 @@ class LiveOrderCoordinator:
         request = LiveOrderRequest.model_validate(payload)
         if haversine_km(request.origin[0], request.origin[1], request.destination[0], request.destination[1]) > MAX_DELIVERY_RADIUS_KM:
             raise ValueError("La dirección de entrega excede el límite operativo de 20 km")
+        if _minutes_in_day(self.simulation_minutes) >= 22 * 60 and _flagged_zone_id(request.destination):
+            raise ValueError("🚫 Flagged Zone unavailable after 22:00")
         async with self._lock:
             self.dispatch_log = None
             if not self._candidate_drivers():
@@ -262,8 +311,9 @@ class LiveOrderCoordinator:
                 destination_label=request.destination_label, location=request.destination, items=request.items,
                 distance_km=round(estimate.distance_km, 2), eta_minutes=round(estimate.duration_minutes, 1),
                 delivery_fee_mxn=round(39 + estimate.distance_km * 8.5, 2),
-                courier_payout_mxn=round(BASE_COURIER_PAYOUT_MXN + estimate.distance_km * COURIER_PAYOUT_PER_KM, 2),
-                platform_commission_mxn=round(max(0, 39 + estimate.distance_km * 8.5 - (BASE_COURIER_PAYOUT_MXN + estimate.distance_km * COURIER_PAYOUT_PER_KM)), 2), route_geometry=estimate.geometry,
+                courier_payout_mxn=round(BASE_COURIER_PAYOUT_MXN + estimate.distance_km * COURIER_PAYOUT_PER_KM + request.tip_mxn, 2),
+                platform_commission_mxn=round(max(0, 39 + estimate.distance_km * 8.5 - (BASE_COURIER_PAYOUT_MXN + estimate.distance_km * COURIER_PAYOUT_PER_KM)), 2),
+                tip_mxn=request.tip_mxn, weight_kg=request.weight_kg or 1.0, volume_liters=request.volume_liters or 1.0, route_geometry=estimate.geometry,
                 street_names=estimate.street_names,
             )
             self.orders[order.id] = order
@@ -331,6 +381,13 @@ class LiveOrderCoordinator:
                     "Gonzalitos": "GONZALITOS_FLOOD",
                 }.get(zone, zone.upper().replace(" ", "_"))
                 notes.append(f"{disruption_name} (x{zone_factor:.1f})")
+        for closure in self.road_closures:
+            position = closure.get("position")
+            if not position or len(position) != 2:
+                continue
+            if any(haversine_km(point[0], point[1], position[0], position[1]) <= .7 for point in points):
+                factor = max(factor, 3.0)
+                notes.append(f"ROAD_CLOSURE ({closure.get('label', 'pinned')})")
         return factor, notes
 
     async def _conditioned_route(self, origin: list[float], destination: list[float]):
@@ -339,12 +396,75 @@ class LiveOrderCoordinator:
         estimate.duration_minutes = round(estimate.duration_minutes * factor, 2)
         return estimate, notes
 
+    @staticmethod
+    def _vehicle_key(vehicle: str | None) -> str:
+        normalized = (vehicle or "moto").strip().lower()
+        if any(token in normalized for token in ("bike", "bici", "bicic")):
+            return "bike"
+        if any(token in normalized for token in ("car", "auto", "coche")):
+            return "car"
+        return "moto"
+
+    def _fits_capacity(self, driver: dict, order: LiveOrder) -> bool:
+        max_weight, max_volume = VEHICLE_CAPACITY[self._vehicle_key(driver.get("vehicle_profile") or driver.get("vehicle"))]
+        return order.weight_kg <= max_weight and order.volume_liters <= max_volume
+
+    def _refresh_driver_status(self, driver: dict) -> None:
+        """Apply only live-operation availability rules; evaluation state is separate."""
+        now = _minutes_in_day(self.simulation_minutes)
+        start = driver.get("shift_start_minute")
+        end = driver.get("shift_end_minute")
+        if start is not None and end is not None and not (start <= now <= end):
+            driver["is_available"] = False
+            driver["status"] = "OFF_SHIFT"
+            return
+        if (driver.get("delay_until_minute") or 0) > self.simulation_minutes:
+            driver["is_available"] = False
+            driver["status"] = "DELAYED"
+            return
+        if (driver.get("break_until_minute") or 0) > self.simulation_minutes:
+            driver["is_available"] = False
+            driver["status"] = "ON_BREAK"
+            return
+        if driver.get("status") in {"DELAYED", "ON_BREAK", "OFF_SHIFT"}:
+            driver["status"] = "ONLINE"
+            driver["delay_until_minute"] = None
+            driver["break_until_minute"] = None
+            driver["continuous_riding_minutes"] = 0.0
+        driver["is_available"] = bool(driver.get("online") and driver.get("position") is not None)
+
+    async def apply_control_state(self, state: dict) -> None:
+        """Receive the Pi-owned Time Machine state before dispatch or motion ticks."""
+        async with self._lock:
+            self.simulation_minutes = float(state.get("simulated_minutes", self.simulation_minutes))
+            self.road_closures = list(state.get("road_closures") or [])
+            self.surge_multiplier = float(state.get("surge_multiplier", 1.0))
+            for driver_id, delay in (state.get("driver_delays") or {}).items():
+                driver = self.drivers.get(driver_id)
+                if driver:
+                    driver["delay_until_minute"] = float(delay.get("until_minute", self.simulation_minutes))
+                    driver["status"] = "DELAYED"
+            for driver in self.drivers.values():
+                self._refresh_driver_status(driver)
+
+    async def apply_driver_delay(self, driver_id: str, minutes: float) -> dict | None:
+        async with self._lock:
+            driver = self.drivers.get(driver_id)
+            if not driver:
+                return None
+            driver["delay_until_minute"] = self.simulation_minutes + max(1.0, minutes)
+            driver["status"] = "DELAYED"
+            driver["is_available"] = False
+            driver["updated_at"] = _utc_now()
+            return self._public_driver(driver, "DELAYED")
+
     def _candidate_drivers(self, orders: Iterable[LiveOrder] = ()) -> list[dict]:
         order_ids = {order.id for order in orders}
         return [
             driver for driver in self.drivers.values()
             if driver.get("online") and driver.get("is_available") and driver.get("position") is not None
             and len(driver["assigned_order_ids"]) + len(order_ids - set(driver["assigned_order_ids"])) <= 2
+            and all(driver["id"] not in order.declined_driver_ids and self._fits_capacity(driver, order) for order in orders)
         ]
 
     async def _select_driver_with_trace(self, origin: list[float], orders: list[LiveOrder]) -> dict | None:
@@ -356,9 +476,12 @@ class LiveOrderCoordinator:
         for driver in candidates:
             estimate, penalties = await self._conditioned_route(driver["position"], origin)
             evaluations.append((driver, round(estimate.distance_km, 2), round(estimate.duration_minutes, 1), penalties))
+        tip_value = sum(order.tip_mxn for order in orders)
         selected, selected_distance, selected_eta, _ = min(
             evaluations,
-            key=lambda value: (value[2], value[1], len(value[0]["assigned_order_ids"]), value[0]["id"]),
+            # Nearby availability remains the primary signal; tips influence
+            # the value score only after physical route cost is accounted for.
+            key=lambda value: (value[2] - min(tip_value, 100) / 25, value[2], value[1], len(value[0]["assigned_order_ids"]), value[0]["id"]),
         )
         if len(evaluations) >= 2:
             slowest_eta = max(eta for _, _, eta, _ in evaluations)
@@ -474,6 +597,29 @@ class LiveOrderCoordinator:
                 return batch, []
             if not driver_id or any(order.driver_id != driver_id for order in orders):
                 raise ValueError("This courier is not assigned to the selected order")
+            driver = self.drivers.get(driver_id)
+            if request.action == "DECLINE_ASSIGNMENT":
+                # Declining never destroys an order: it goes straight back to
+                # the Pi-owned pool and excludes only the declining courier.
+                if driver:
+                    driver["assigned_order_ids"] = [order_id for order_id in driver["assigned_order_ids"] if order_id not in {order.id for order in orders}]
+                    driver["updated_at"] = _utc_now()
+                for order in orders:
+                    if driver_id not in order.declined_driver_ids:
+                        order.declined_driver_ids.append(driver_id)
+                    order.driver_id = None
+                    order.courier_route_geometry = []
+                    order.courier_distance_km = 0
+                    order.courier_eta_minutes = 0
+                if batch:
+                    batch.driver_id = None
+                    batch.status = "PENDING_REASSIGNMENT"
+                await self._assign_driver(orders, batch)
+                await self._attach_courier_route(orders)
+                return batch, orders
+            if request.action in {"ACCEPT_BATCH", "ACCEPT_ASSIGNMENT"} and _minutes_in_day(self.simulation_minutes) >= 22 * 60:
+                if any(_flagged_zone_id(order.origin) or _flagged_zone_id(order.destination) for order in orders):
+                    raise ValueError("flagged_zone_night")
             if request.action in {"ACCEPT_BATCH", "ACCEPT_ASSIGNMENT"}:
                 for order in orders:
                     order.status = "MATCHED"
@@ -618,19 +764,106 @@ class LiveOrderCoordinator:
             self.telemetry[request.driver_id] = telemetry
             return telemetry
 
-    async def advance(self, real_seconds: float = 0.5) -> list[dict]:
+    async def launch_full_demo(self) -> dict:
+        """Create the explicitly requested isolated 15-order / 7-courier demo mesh.
+
+        These records exist only in coordinator memory and are identified with
+        `demo-` ids, so they never alter SQLite accounts or ordinary sessions.
+        """
+        driver_specs = [
+            ("Ariana", "moto", [25.6496, -100.3595]), ("Bruno", "bike", [25.6518, -100.2894]),
+            ("Camila", "car", [25.6819, -100.3697]), ("Diego", "moto", [25.6786, -100.3428]),
+            ("Elena", "bike", [25.6834, -100.3690]), ("Fabio", "car", [25.7254, -100.3863]),
+            ("Gina", "moto", [25.6441, -100.3301]),
+        ]
+        destinations = [
+            [25.6488, -100.3574], [25.6517, -100.2892], [25.6441, -100.3301], [25.6786, -100.3428],
+            [25.6834, -100.3690], [25.7254, -100.3863], [25.6650, -100.3090], [25.6940, -100.3340],
+            [25.6730, -100.3730], [25.6360, -100.3190], [25.7090, -100.3570], [25.6620, -100.2760],
+            [25.6950, -100.3000], [25.6160, -100.3460], [25.7040, -100.4050],
+        ]
+        origins = [[25.6496, -100.3595], [25.6518, -100.2894], [25.6819, -100.3697]]
+        async with self._lock:
+            for collection in (self.users, self.drivers, self.telemetry):
+                for key in [key for key in collection if key.startswith("demo-")]:
+                    collection.pop(key, None)
+            for key in [key for key in self.orders if key.startswith("DEMO-")]:
+                self.orders.pop(key, None)
+
+            for index, (name, vehicle, position) in enumerate(driver_specs, start=1):
+                driver_id = f"demo-driver-{index}"
+                self.users[driver_id] = {"id": driver_id, "name": name, "email": f"{driver_id}@rumbo.demo", "role": "driver", "registered_at": _utc_now()}
+                self.drivers[driver_id] = {
+                    "id": driver_id, "name": name, "online": True, "is_available": True, "position": position,
+                    "bearing": 0, "speed_kmh": 0, "street_name": "Monterrey", "assigned_order_ids": [],
+                    "vehicle": {"moto": "Moto demo", "bike": "Bicicleta demo", "car": "Auto demo"}[vehicle],
+                    "vehicle_profile": vehicle, "avatar_url": None, "shift_start_minute": 14 * 60,
+                    "shift_end_minute": 18 * 60, "continuous_riding_minutes": 0.0, "break_until_minute": None,
+                    "delay_until_minute": None, "heat_rule_alert": False, "status": "ONLINE", "updated_at": _utc_now(),
+                }
+
+            for index, destination in enumerate(destinations, start=1):
+                client_id = f"demo-client-{index}"
+                origin = origins[(index - 1) % len(origins)]
+                distance = round(haversine_km(origin[0], origin[1], destination[0], destination[1]) * 1.24, 2)
+                self.users[client_id] = {"id": client_id, "name": f"Demo Client {index}", "email": f"{client_id}@rumbo.demo", "role": "client", "registered_at": _utc_now()}
+                order = LiveOrder(
+                    id=f"DEMO-{index:03d}", client_id=client_id, client_name=f"Demo Client {index}",
+                    restaurant=f"Rumbo Kitchen {((index - 1) % 3) + 1}", origin=origin, destination=destination,
+                    destination_label=f"Monterrey stop {index}", location=destination, items=[{"id": "demo-meal", "quantity": 1}],
+                    status="MATCHED",
+                    distance_km=distance, eta_minutes=round(max(3, distance * 3.5), 1),
+                    delivery_fee_mxn=round(39 + distance * 8.5, 2), courier_payout_mxn=round(35 + distance * 7.25, 2),
+                    platform_commission_mxn=round(max(0, 4 + distance * 1.25), 2), tip_mxn=(index % 4) * 15,
+                    weight_kg=3.0, volume_liters=4.0,
+                    route_geometry=[[origin[1], origin[0]], [destination[1], destination[0]]], street_names=["Monterrey street mesh"],
+                )
+                eligible = [driver for driver in self.drivers.values() if driver["id"].startswith("demo-") and len(driver["assigned_order_ids"]) < 3 and self._fits_capacity(driver, order)]
+                driver = min(eligible, key=lambda item: haversine_km(item["position"][0], item["position"][1], origin[0], origin[1]))
+                order.driver_id = driver["id"]
+                order.courier_route_geometry = [[driver["position"][1], driver["position"][0]], [origin[1], origin[0]]]
+                order.courier_distance_km = round(haversine_km(driver["position"][0], driver["position"][1], origin[0], origin[1]) * 1.24, 2)
+                order.courier_eta_minutes = round(max(2, order.courier_distance_km * 3.5), 1)
+                order.courier_street_names = ["Monterrey street mesh"]
+                driver["assigned_order_ids"].append(order.id)
+                self.orders[order.id] = order
+            return self.snapshot()
+
+    async def advance(self, real_seconds: float = 0.5, simulated_minutes: float | None = None) -> list[dict]:
         """Advance server-side courier snapshots; browsers interpolate them at 60 FPS."""
         async with self._lock:
-            self.simulation_minutes += real_seconds * TIME_WARP / 60
+            previous_minute = self.simulation_minutes
+            if simulated_minutes is None:
+                self.simulation_minutes += real_seconds * TIME_WARP / 60
+            else:
+                self.simulation_minutes = float(simulated_minutes)
+            elapsed_simulated_minutes = max(0.0, self.simulation_minutes - previous_minute)
             updates: list[dict] = []
             for driver_id, driver in self.drivers.items():
                 if not driver.get("online"):
+                    continue
+                self._refresh_driver_status(driver)
+                if driver.get("status") in {"DELAYED", "ON_BREAK", "OFF_SHIFT"}:
                     continue
                 active_orders = [
                     self.orders[order_id] for order_id in driver["assigned_order_ids"]
                     if order_id in self.orders and self.orders[order_id].status in {"MATCHED", "IN_TRANSIT"}
                 ]
                 if not active_orders:
+                    continue
+                driver["continuous_riding_minutes"] = driver.get("continuous_riding_minutes", 0.0) + elapsed_simulated_minutes
+                clock_minute = _minutes_in_day(self.simulation_minutes)
+                heat_window = 12 * 60 <= clock_minute <= 16 * 60
+                if heat_window and driver["continuous_riding_minutes"] >= 90:
+                    driver["heat_rule_alert"] = True
+                    driver["break_until_minute"] = self.simulation_minutes + 20
+                    driver["status"] = "ON_BREAK"
+                    driver["is_available"] = False
+                    continue
+                if driver["continuous_riding_minutes"] >= 240:
+                    driver["break_until_minute"] = self.simulation_minutes + 20
+                    driver["status"] = "ON_BREAK"
+                    driver["is_available"] = False
                     continue
                 active = active_orders[0]
                 batch = self.batches.get(active.batch_id or "")
@@ -744,6 +977,14 @@ class LiveOrderCoordinator:
                 order.route_geometry = direct.geometry
                 order.street_names = direct.street_names
                 order.delivery_fee_mxn = round(39 + direct.distance_km * 8.5, 2)
+
+            # A closure or weather event also changes the approach leg. Refresh
+            # it for every assigned active courier, not just a batch route.
+            refreshed_drivers: set[str] = set()
+            for order in active_orders:
+                if order.driver_id and order.driver_id not in refreshed_drivers:
+                    await self._attach_courier_route([order])
+                    refreshed_drivers.add(order.driver_id)
 
             if not self.batch:
                 return None
