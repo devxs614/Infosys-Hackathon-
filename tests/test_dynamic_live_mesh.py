@@ -46,7 +46,7 @@ def test_global_authentication_persists_in_the_pi_database_between_app_sessions(
         assert login.json()["session_token"] != created["session_token"]
 
 
-def test_late_real_driver_receives_pending_order_and_client_sees_the_same_person():
+def test_real_driver_can_become_available_after_a_rejected_request_and_client_sees_the_same_person():
     with TestClient(create_app()) as client:
         customer = _register_account(client, "Sofía", "sofia@example.com", "client")
         driver = _register_account(client, "Carlos", "carlos@example.com", "driver", "Yamaha FZ")
@@ -60,12 +60,16 @@ def test_late_real_driver_receives_pending_order_and_client_sees_the_same_person
                 "restaurant": "Tec", "origin": [25.6518, -100.2894], "destination": [25.6488, -100.3574],
                 "destination_label": "Centrito Valle", "items": [{"id": "bowl", "quantity": 1}],
             }})
-            pending = _receive_until(customer_socket, "NEW_ORDER")["data"]["order"]
-            assert pending["driver_id"] is None
             _receive_until(customer_socket, "NO_DRIVERS_AVAILABLE")
 
             _bind(driver_socket, driver, [25.65, -100.35])
             _receive_until(driver_socket, "DRIVER_ONLINE")
+            customer_socket.send_json({"type": "NEW_ORDER", "data": {
+                "client_id": customer["user"]["id"], "session_token": customer["session_token"],
+                "restaurant": "Tec", "origin": [25.6518, -100.2894], "destination": [25.6488, -100.3574],
+                "destination_label": "Centrito Valle", "items": [{"id": "bowl", "quantity": 1}],
+            }})
+            pending = _receive_until(customer_socket, "NEW_ORDER")["data"]["order"]
             dispatched = _receive_until(driver_socket, "ORDER_DISPATCHED")["data"]
             assert dispatched["order"]["id"] == pending["id"]
             assert dispatched["driver"]["name"] == "Carlos"

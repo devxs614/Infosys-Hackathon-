@@ -321,6 +321,7 @@ class LiveOrder(BaseModel):
     courier_route_geometry: list[list[float]] = Field(default_factory=list)
     courier_distance_km: float = 0
     courier_eta_minutes: float = 0
+    courier_street_names: list[str] = Field(default_factory=list)
     street_names: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 

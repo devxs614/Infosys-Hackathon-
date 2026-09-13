@@ -39,9 +39,12 @@ def create_app() -> FastAPI:
         async def advance_live_mesh() -> None:
             while not telemetry_stop.is_set():
                 await asyncio.sleep(0.5)
-                for update in await app.state.live_orders.advance(0.5):
+                updates = await app.state.live_orders.advance(0.5)
+                for update in updates:
                     await app.state.connections.broadcast("DRIVER_TELEMETRY", update)
                     await app.state.connections.broadcast("DRIVER_FINANCIAL_UPDATE", app.state.live_orders.driver_financial_update(update["driver_id"]))
+                if updates:
+                    await app.state.connections.broadcast("LIVE_ORDER_STATE", app.state.live_orders.snapshot())
                 await app.state.connections.broadcast("VERDICT_EVALUATION", app.state.live_orders.verdict_evaluation())
                 await app.state.connections.broadcast("LIVE_METRICS", app.state.live_orders.snapshot()["metrics"])
 

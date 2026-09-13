@@ -105,23 +105,32 @@ function normalizeRoute(route, routeCoordinates) {
 }
 
 export function RumboMap({
-  className = '', origin, destination, route = [], routeCoordinates = 'lonlat', driver, orders = [],
+  className = '', origin, destination, route = [], routeCoordinates = 'lonlat', driver, drivers = [], orders = [],
   courierRoute = [], courierRouteCoordinates = 'lonlat', interactive = false, onDestinationChange, showBounds = true,
 }) {
   const originPoint = origin?.coords || origin
   const destinationPoint = destination?.coords || destination
   const line = useMemo(() => normalizeRoute(route, routeCoordinates), [route, routeCoordinates])
   const courierLine = useMemo(() => normalizeRoute(courierRoute, courierRouteCoordinates), [courierRoute, courierRouteCoordinates])
-  const movingDriver = usePolylineDriver(driver, line)
-  const split = useMemo(() => splitRoute(line, movingDriver?.progress), [line, movingDriver?.progress])
+  const motionLine = driver?.phase === 'COURIER_TO_STORE' ? courierLine : line
+  const movingDriver = usePolylineDriver(driver, motionLine)
+  const courierProgress = movingDriver?.phase === 'COURIER_TO_STORE' ? movingDriver.progress : movingDriver?.phase === 'STORE_TO_CLIENT' ? 1 : undefined
+  const deliveryProgress = movingDriver?.phase === 'STORE_TO_CLIENT' ? movingDriver.progress : movingDriver?.phase === 'COURIER_TO_STORE' ? 0 : undefined
+  const courierSplit = useMemo(() => splitRoute(courierLine, courierProgress), [courierLine, courierProgress])
+  const split = useMemo(() => splitRoute(line, deliveryProgress), [line, deliveryProgress])
   const orderPoints = orders.map((order) => order.destination || order.location).filter(Boolean)
-  const points = [originPoint, destinationPoint, movingDriver?.position, ...courierLine, ...line, ...orderPoints].filter(Boolean)
+  const movingDriverId = movingDriver?.id || movingDriver?.driver_id
+  const otherDrivers = drivers.filter((item) => item?.position && item.id !== movingDriverId)
+  const points = [originPoint, destinationPoint, movingDriver?.position, ...otherDrivers.map((item) => item.position), ...courierLine, ...line, ...orderPoints].filter(Boolean)
   return <div className={`rumbo-map relative overflow-hidden rounded-[1.6rem] border border-white/10 bg-[#0a111c] ${className}`}>
     <MapContainer center={destinationPoint || originPoint || monterreyCenter} zoom={12} scrollWheelZoom className="h-full w-full" zoomControl={false} attributionControl>
       <TileLayer url={tileUrl} attribution={tileAttribution} />
       {showBounds && <Bounds points={points} />}
       {interactive && <ClickToPlace onChange={onDestinationChange} />}
-      {courierLine.length > 1 && <><Polyline positions={courierLine} pathOptions={{ color: '#f59e0b', weight: 10, opacity: .13, lineCap: 'round', dashArray: '4 10' }} /><Polyline positions={courierLine} pathOptions={{ color: '#fbbf24', weight: 3, opacity: .9, lineCap: 'round', dashArray: '4 10' }} /></>}
+      {courierLine.length > 1 && <>
+        {courierSplit.completed.length > 1 && <Polyline positions={courierSplit.completed} pathOptions={{ color: '#94a3b8', weight: 6, opacity: .32, lineCap: 'round' }} />}
+        {courierSplit.pending.length > 1 && <><Polyline positions={courierSplit.pending} pathOptions={{ color: '#f59e0b', weight: 10, opacity: .15, lineCap: 'round', dashArray: '4 10' }} /><Polyline positions={courierSplit.pending} pathOptions={{ color: '#fbbf24', weight: 4, opacity: .96, lineCap: 'round', dashArray: '4 10' }} /></>}
+      </>}
       {line.length > 1 && <>
         {split.completed.length > 1 && <Polyline positions={split.completed} pathOptions={{ color: '#94a3b8', weight: 6, opacity: .38, lineCap: 'round' }} />}
         {split.pending.length > 1 && <><Polyline positions={split.pending} pathOptions={{ color: '#06b6d4', weight: 10, opacity: .16, lineCap: 'round' }} /><Polyline positions={split.pending} pathOptions={{ color: '#8b5cf6', weight: 4, opacity: .96, lineCap: 'round' }} /></>}
@@ -129,6 +138,7 @@ export function RumboMap({
       {originPoint && <Marker position={originPoint} icon={icon('pickup')}><Tooltip direction="top" offset={[0, -12]}>{origin?.name || 'Origen · Rumbo Kitchen'}</Tooltip></Marker>}
       {destinationPoint && <Marker position={destinationPoint} icon={icon('destination')} draggable={interactive} eventHandlers={{ dragend: (event) => { const point = event.target.getLatLng(); onDestinationChange?.([point.lat, point.lng]) } }}><Tooltip direction="top" offset={[0, -12]} permanent={interactive}>{destination?.name || 'Entrega'}</Tooltip></Marker>}
       {movingDriver?.position && <Marker position={movingDriver.position} icon={icon('driver', movingDriver.bearing)}><Tooltip direction="top" offset={[0, -12]}>{movingDriver.name}{movingDriver.street_name ? ` · ${movingDriver.street_name}` : ''}</Tooltip></Marker>}
+      {otherDrivers.map((item) => <Marker key={item.id} position={item.position} icon={icon('driver', item.bearing)}><Tooltip direction="top" offset={[0, -12]}>{item.name}{item.street_name ? ` · ${item.street_name}` : ''}</Tooltip></Marker>)}
       {orderPoints.map((point, index) => <CircleMarker key={`${point.join('-')}-${index}`} center={point} radius={6} pathOptions={{ color: '#22d3ee', fillColor: '#06b6d4', fillOpacity: .7 }} />)}
     </MapContainer>
     <div className="pointer-events-none absolute bottom-4 left-4 z-[500] rounded-xl border border-white/10 bg-black/55 px-3 py-2 text-[9px] font-semibold tracking-[.16em] text-cyan/90 backdrop-blur">{courierLine.length > 1 ? 'ÁMBAR · COURIER → TIENDA  ·  VIOLETA · TIENDA → CLIENTE' : 'MONTERREY · LIVE STREET GRAPH'}</div>

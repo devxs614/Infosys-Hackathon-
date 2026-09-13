@@ -4,6 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from edge_server.live_order_service import NoDriversAvailableError
+
 router = APIRouter()
 
 
@@ -40,6 +42,9 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                     if not identity:
                         await manager.send(websocket, "error", {"message": "Authenticate with /api/auth before opening the live session"})
                         continue
+                    if identity["role"] == "driver" and payload.get("location") is None:
+                        await manager.send(websocket, "error", {"message": "Set a Monterrey starting location before going online"})
+                        continue
                     await manager.bind_user(websocket, identity["id"])
                     registration = await websocket.app.state.live_orders.register_user({**identity, "location": payload.get("location")})
                     await manager.broadcast("USER_REGISTERED", registration)
@@ -49,6 +54,8 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                             dispatch = websocket.app.state.live_orders.order_dispatch_payload(websocket.app.state.live_orders.orders[order_id])
                             if dispatch:
                                 await manager.send_to_user(registration["driver"]["id"], "ORDER_DISPATCHED", dispatch)
+                        if websocket.app.state.live_orders.dispatch_log:
+                            await manager.broadcast("AI_DISPATCH_LOG", websocket.app.state.live_orders.dispatch_log)
                         await manager.broadcast("DRIVER_FINANCIAL_UPDATE", websocket.app.state.live_orders.driver_financial_update(registration["driver"]["id"]))
                     await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())
                 except ValidationError as exc:
@@ -78,9 +85,15 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                         batch_data = batch.model_dump(mode="json")
                         await manager.broadcast("AI_BATCH_SUGGESTION", batch_data)
                         await manager.broadcast("AI_BATCH_OPTIMIZATION", batch_data)
+                    if websocket.app.state.live_orders.dispatch_log:
+                        await manager.broadcast("AI_DISPATCH_LOG", websocket.app.state.live_orders.dispatch_log)
                     await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())
                 except ValidationError as exc:
                     await manager.send(websocket, "error", {"message": "Invalid NEW_ORDER", "details": _validation_details(exc)})
+                except NoDriversAvailableError as exc:
+                    await manager.send(websocket, "NO_DRIVERS_AVAILABLE", {
+                        "status": "NO_DRIVERS_AVAILABLE", "message": str(exc),
+                    })
                 except ValueError as exc:
                     await manager.send(websocket, "error", {"message": str(exc)})
 
@@ -144,4 +157,6 @@ async def simulation_websocket(websocket: WebSocket) -> None:
                     dispatch = websocket.app.state.live_orders.order_dispatch_payload(order)
                     if dispatch:
                         await manager.send_to_user(order.driver_id, "ORDER_DISPATCHED", dispatch)
+                if websocket.app.state.live_orders.dispatch_log:
+                    await manager.broadcast("AI_DISPATCH_LOG", websocket.app.state.live_orders.dispatch_log)
                 await manager.broadcast("LIVE_ORDER_STATE", websocket.app.state.live_orders.snapshot())

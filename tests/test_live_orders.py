@@ -40,7 +40,7 @@ def _new_order(socket, customer: dict, destination: list[float] = [25.6488, -100
     }})
 
 
-def test_orders_without_a_live_registered_driver_remain_pending_and_are_not_invented():
+def test_orders_without_a_live_registered_driver_are_rejected_without_a_pending_record():
     with TestClient(create_app()) as client:
         customer = _account(client, name="Mariana", email="mariana@example.com", role="client")
         with client.websocket_connect("/ws") as customer_socket:
@@ -48,11 +48,8 @@ def test_orders_without_a_live_registered_driver_remain_pending_and_are_not_inve
             _register_socket(customer_socket, customer)
             _new_order(customer_socket, customer)
 
-            order = _receive_until(customer_socket, "NEW_ORDER")["data"]["order"]
             unavailable = _receive_until(customer_socket, "NO_DRIVERS_AVAILABLE")["data"]
 
-            assert order["status"] == "PENDING"
-            assert order["driver_id"] is None
             assert unavailable["status"] == "NO_DRIVERS_AVAILABLE"
             assert unavailable["message"] == "No hay repartidores disponibles en este momento"
 
@@ -66,6 +63,23 @@ def test_order_rejects_an_address_outside_the_twenty_kilometre_service_radius():
             _new_order(customer_socket, customer, destination=[25.45, -100.05])
             error = _receive_until(customer_socket, "error")
             assert error["data"]["message"] == "La dirección de entrega excede el límite operativo de 20 km"
+
+
+def test_courier_requires_a_starting_pin_before_the_server_marks_it_online():
+    with TestClient(create_app()) as client:
+        courier = _account(client, name="Pin Required", email="pin@example.com", role="driver")
+        with client.websocket_connect("/ws") as socket:
+            _ready(socket)
+            socket.send_json({"type": "DRIVER_ONLINE", "data": {
+                "user_id": courier["user"]["id"], "session_token": courier["session_token"], "location": None,
+            }})
+            error = _receive_until(socket, "error")
+            assert error["data"]["message"] == "Set a Monterrey starting location before going online"
+
+            _register_socket(socket, courier, [25.6551, -100.3781])
+            online = _receive_until(socket, "DRIVER_ONLINE")["data"]["driver"]
+            assert online["is_available"] is True
+            assert online["position"] == [25.6551, -100.3781]
 
 
 def test_only_the_targeted_real_courier_can_accept_its_dispatched_order():
@@ -86,6 +100,7 @@ def test_only_the_targeted_real_courier_can_accept_its_dispatched_order():
 
             _new_order(customer_socket, customer)
             order = _receive_until(customer_socket, "NEW_ORDER")["data"]["order"]
+            trace = _receive_until(customer_socket, "AI_DISPATCH_LOG")["data"]
             dispatch = _receive_until(topo_socket, "ORDER_DISPATCHED")["data"]
 
             assert order["status"] == "PENDING"
@@ -94,6 +109,9 @@ def test_only_the_targeted_real_courier_can_accept_its_dispatched_order():
             assert dispatch["driver"]["name"] == "Topo"
             assert dispatch["driver"]["vehicle"] == "Bicicleta eléctrica"
             assert "rating" not in dispatch["driver"]
+            assert trace["selected_driver_id"] == topo["user"]["id"]
+            assert {candidate["name"] for candidate in trace["candidates"]} == {"Topo", "Luz"}
+            assert any(candidate["selected"] and candidate["name"] == "Topo" for candidate in trace["candidates"])
 
             other_socket.send_json({"type": "DRIVER_ACTION", "data": {
                 "action": "ACCEPT_ASSIGNMENT", "driver_id": other["user"]["id"],
@@ -110,3 +128,5 @@ def test_only_the_targeted_real_courier_can_accept_its_dispatched_order():
             assert match["order"]["status"] == "MATCHED"
             assert match["driver"]["name"] == "Topo"
             assert match["driver"]["vehicle"] == "Bicicleta eléctrica"
+            assert match["order"]["courier_route_geometry"]
+            assert match["order"]["route_geometry"]
