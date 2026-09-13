@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Awaitable, Callable
 
 from edge_server.agents.baseline_agent import BaselineAgent
@@ -40,13 +41,42 @@ class SimulationEngine:
         self.running = False
         self._task: asyncio.Task[None] | None = None
         self._automatic_events: list[Disruption] = []
+        # Zone ids follow the deterministic order in order_generator.ZONES;
+        # id 5 intentionally keeps the existing Macroplaza starting position.
+        self._configured_vehicle = "moto"
+        self._configured_start_zone = 5
         self.baseline_world, self.ai_world = self._new_worlds()
 
     def _new_worlds(self) -> tuple[DriverWorld, DriverWorld]:
-        origin = ZONES["Macroplaza"]
+        zone_names = tuple(ZONES)
+        origin = ZONES[zone_names[(self._configured_start_zone - 1) % len(zone_names)]]
         baseline = DriverState(driver_id="baseline", lat=origin[0], lon=origin[1])
         ai = DriverState(driver_id="gemini", lat=origin[0], lon=origin[1])
         return DriverWorld(baseline), DriverWorld(ai)
+
+    def protocol_configuration(self) -> dict:
+        """Expose runtime shift inputs without exposing mutable world internals."""
+        return {
+            "seed": self.settings.scenario_seed,
+            "shift_hours": self.settings.shift_minutes / 60,
+            "vehicle": self._configured_vehicle,
+            "start_location_zone": self._configured_start_zone,
+        }
+
+    async def configure_shift(self, *, seed: int, shift_hours: float, vehicle: str, start_location_zone: int) -> dict:
+        """Reset the deterministic stream before a judge-configured demo shift."""
+        await self.stop()
+        shift_minutes = max(1, round(shift_hours * 60))
+        self.settings = replace(self.settings, scenario_seed=seed, shift_minutes=shift_minutes)
+        self.clock = SimulationClock(shift_minutes, self.settings.demo_seconds, self.settings.tick_ms)
+        self.scenario = ScenarioStream(seed, shift_minutes)
+        self.event_engine = EventEngine()
+        self._automatic_events = []
+        self._configured_vehicle = vehicle
+        self._configured_start_zone = start_location_zone
+        self.baseline_world, self.ai_world = self._new_worlds()
+        await self._publish("simulation_state", self.state().model_dump(mode="json"))
+        return self.protocol_configuration()
 
     async def start(self) -> None:
         if self.running:

@@ -6,6 +6,7 @@ import { ClientAssignmentModal } from './rumbo/ClientAssignmentModal'
 import { CommandCenter } from './rumbo/CommandCenter'
 import { DriverHUD } from './rumbo/DriverHUD'
 import { Landing } from './rumbo/Landing'
+import { DriverVehicleSelector, JudgeDashboardDock, ProtocolShiftClock, useProtocolShift } from './rumbo/ProtocolSuite'
 import { useRumboLive } from './rumbo/useRumboLive'
 import { useRumboRoute } from './rumbo/useRumboRoute'
 
@@ -75,7 +76,7 @@ function readSession() {
   try { return JSON.parse(window.localStorage.getItem(sessionKey) || 'null') } catch { return null }
 }
 
-function RouteScene({ path, query, navigate, liveState, socket, profile, onAuthenticated, onLogout }) {
+function RouteScene({ path, query, navigate, liveState, socket, profile, onAuthenticated, onLogout, protocol }) {
   const onHome = () => navigate('/')
   const connected = socket.status === 'connected'
   if (path === '/app/client' && profile?.role === 'client') {
@@ -83,15 +84,16 @@ function RouteScene({ path, query, navigate, liveState, socket, profile, onAuthe
     const assignment = clientOrder ? liveState.live.orderMatches?.[clientOrder.id] : null
     return <><ClientExperience profile={profile} live={liveState.live} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} /><ClientAssignmentModal assignment={assignment} /><NoCouriersModal notice={liveState.live.noCouriersNotice} onDismiss={liveState.dismissNoCouriersNotice} /></>
   }
-  if (path === '/app/driver' && profile?.role === 'driver') return <DriverHUD profile={profile} live={liveState.live} notification={liveState.driverNotifications?.[profile.id] || liveState.notification} onDismiss={() => liveState.dismissNotification(profile.id)} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} />
-  if (path === '/app/dashboard') return <CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} />
-  return <Landing onAuthenticated={onAuthenticated} />
+  if (path === '/app/driver' && profile?.role === 'driver') return <><DriverHUD profile={profile} live={liveState.live} notification={liveState.driverNotifications?.[profile.id] || liveState.notification} onDismiss={() => liveState.dismissNotification(profile.id)} connected={connected} send={socket.send} onHome={onHome} onLogout={onLogout} /><DriverVehicleSelector profile={profile} live={liveState.live} protocol={protocol} /></>
+  if (path === '/app/dashboard') return <><CommandCenter profile={profile} live={liveState.live} simulation={liveState.simulation} connected={connected} onTrigger={liveState.trigger} onStart={liveState.startDemo} onHome={onHome} onLogout={onLogout} /><JudgeDashboardDock protocol={protocol} onTrigger={liveState.trigger} /></>
+  return <Landing onAuthenticated={onAuthenticated} protocol={protocol} />
 }
 
 export default function App() {
   const route = useRumboRoute()
   const liveState = useRumboLive()
   const socket = useWebSocket(liveState.onMessage)
+  const protocol = useProtocolShift()
   const [profile, setProfile] = useState(readSession)
   useEffect(() => {
     if (socket.status !== 'connected' || !profile?.session_token) return undefined
@@ -110,5 +112,5 @@ export default function App() {
     route.navigate('/')
   }
   const routeKey = `${route.path}:${route.query.get('id') || ''}`
-  return <><EnglishPage /><AnimatePresence mode="wait"><motion.div key={routeKey} initial={{ opacity: 0, filter: 'blur(7px)' }} animate={{ opacity: 1, filter: 'blur(0px)' }} exit={{ opacity: 0, filter: 'blur(7px)' }} transition={{ duration: .3 }}><RouteScene {...route} liveState={liveState} socket={socket} profile={profile} onAuthenticated={authenticate} onLogout={logout} /></motion.div></AnimatePresence></>
+  return <><EnglishPage /><ProtocolShiftClock protocol={protocol} /><AnimatePresence mode="wait"><motion.div key={routeKey} initial={{ opacity: 0, filter: 'blur(7px)' }} animate={{ opacity: 1, filter: 'blur(0px)' }} exit={{ opacity: 0, filter: 'blur(7px)' }} transition={{ duration: .3 }}><RouteScene {...route} liveState={liveState} socket={socket} profile={profile} onAuthenticated={authenticate} onLogout={logout} protocol={protocol} /></motion.div></AnimatePresence></>
 }

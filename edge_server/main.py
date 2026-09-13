@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from edge_server.api import auth, demo, health, routes, security_decisions, websocket
+from edge_server.api import auth, demo, health, protocol_controls, routes, security_decisions, websocket
 from edge_server.config import get_settings
 from edge_server.data.auth_store import AuthStore
 from edge_server.data.telemetry_service import TelemetryService
@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
         app.state.routing = RoutingEngine(settings.osrm_url, settings.use_osrm)
         app.state.live_orders = LiveOrderCoordinator(app.state.engine.gemini_agent, app.state.routing)
         app.state.decision_explanations = {}
+        app.state.decision_degraded = False
         telemetry_stop = asyncio.Event()
 
         async def advance_live_mesh() -> None:
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(demo.router)
     app.include_router(routes.router)
     app.include_router(security_decisions.router)
+    app.include_router(protocol_controls.router)
     app.include_router(websocket.router)
     return app
 

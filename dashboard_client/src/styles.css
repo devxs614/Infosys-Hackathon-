@@ -35,3 +35,11 @@
 .rumbo-marker-pickup span { background: #8b5cf6; }
 .rumbo-marker-destination span { background: #06b6d4; }
 .rumbo-marker-driver span { background: #f59e0b; color: #111827; font-size: 18px; }
+.rumbo-marker-flag span { height: auto; width: auto; border: 0; border-radius: 0; background: transparent; box-shadow: 0 0 22px rgba(255,0,85,.8); font-size: 24px; }
+.rumbo-risk-zone { filter: drop-shadow(0 0 5px rgba(255,0,85,.35)); }
+.rumbo-risk-zone-active { animation: flagged-zone-pulse 1.35s ease-in-out infinite; }
+.protocol-rain { overflow: hidden; background-image: repeating-linear-gradient(112deg, transparent 0 14px, rgba(148, 224, 255, .38) 15px 16px, transparent 17px 31px); animation: protocol-rain-fall .5s linear infinite; mix-blend-mode: screen; opacity: .58; }
+.protocol-closure { background: linear-gradient(115deg, transparent 35%, rgba(255, 0, 85, .18) 36% 64%, transparent 65%); animation: closure-scan 1.6s ease-in-out infinite; }
+@keyframes flagged-zone-pulse { 0%,100% { opacity: .55; filter: drop-shadow(0 0 4px rgba(255,0,85,.35)); } 50% { opacity: 1; filter: drop-shadow(0 0 14px rgba(255,0,85,1)); } }
+@keyframes protocol-rain-fall { from { background-position: 0 -40px; } to { background-position: -20px 30px; } }
+@keyframes closure-scan { 0%,100% { opacity: .35; } 50% { opacity: .85; } }

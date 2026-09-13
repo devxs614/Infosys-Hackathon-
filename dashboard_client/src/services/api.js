@@ -17,5 +17,11 @@ export const authApi = {
 export const demoApi = {
   start: () => request('/demo/start', { method: 'POST' }), stop: () => request('/demo/stop', { method: 'POST' }),
   reset: () => request('/demo/reset', { method: 'POST' }), state: () => request('/demo/state'),
-  trigger: (event_type) => request('/demo/trigger', { method: 'POST', body: JSON.stringify({ event_type }) })
+  trigger: (event_type) => request('/demo/trigger', { method: 'POST', body: JSON.stringify({ event_type }) }),
+  configure: (data) => request('/protocol/shift-config', { method: 'POST', body: JSON.stringify(data) }),
+  setDegraded: (enabled) => request('/protocol/degraded', { method: 'POST', body: JSON.stringify({ enabled }) }),
+}
+
+export const decisionApi = {
+  explain: (orderId) => request(`/explain_decision/${encodeURIComponent(orderId)}`),
 }

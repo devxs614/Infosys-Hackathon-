@@ -45,3 +45,39 @@ def test_practice_pack_security_contract(order_id, data, decision, constraint):
         assert explanation.json()["decision"] == decision
         assert "inputs" in explanation.json()
         assert "alternatives_considered" in explanation.json()
+
+
+def test_vehicle_profiles_apply_their_own_capacity_limits():
+    with TestClient(create_app()) as client:
+        car = client.post("/decide", json={"order_id": "CAR-CAPACITY", "sim_time": "14:00", "vehicle": "car", "weight_kg": 149, "volume_liters": 199})
+        bike = client.post("/decide", json={"order_id": "BIKE-CAPACITY", "sim_time": "14:00", "vehicle": "bike", "weight_kg": 8.1, "volume_liters": 5})
+
+        assert car.json()["decision"] == "ACCEPT"
+        assert bike.json()["binding_constraint"] == "vehicle_capacity"
+
+
+def test_protocol_shift_configuration_and_degraded_mode_do_not_change_fast_path_safety():
+    with TestClient(create_app()) as client:
+        configured = client.post("/protocol/shift-config", json={"seed": 1234, "shift_hours": 8, "vehicle": "bike", "start_location_zone": 7})
+        assert configured.status_code == 200
+        assert configured.json()["config"] == {"seed": 1234, "shift_hours": 8, "vehicle": "bike", "start_location_zone": 7}
+
+        assert client.post("/protocol/degraded", json={"enabled": True}).json()["degraded"] is True
+        decision = client.post("/decide", json={"order_id": "DEGRADED-SAFETY", "sim_time": "22:05", "zone_dropoff": 99, "vehicle": "moto"}).json()
+
+        assert decision["decision"] == "SKIP"
+        assert decision["binding_constraint"] == "flagged_zone_night"
+        assert decision["degraded"] is True
+
+
+def test_earlier_safety_constraints_remain_binding_when_shift_end_also_fails():
+    with TestClient(create_app()) as client:
+        result = client.post("/decide", json={
+            "order_id": "FLAGGED-AND-LATE", "sim_time": "22:20", "zone_dropoff": 99,
+            "vehicle": "moto", "restaurant_prep_min": 10, "estimated_pickup_min": 10,
+            "estimated_delivery_min": 30,
+            "courier_state_overrides": {"shift_end_time": "22:30"},
+        }).json()
+
+        assert result["decision"] == "SKIP"
+        assert result["binding_constraint"] == "flagged_zone_night"

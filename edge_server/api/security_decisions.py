@@ -6,6 +6,7 @@ WebSockets, persistence, or any UI-facing route.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from time import perf_counter
 from typing import Any
 
@@ -32,6 +33,11 @@ _FLAGGED_ZONE_TOKENS = {
 }
 _CONSTRAINTS = {
     "flagged_zone_night", "heat_rule", "mandatory_break", "vehicle_capacity", "shift_end_infeasible",
+}
+VEHICLE_PROFILES = {
+    "moto": {"weight_kg": 20.0, "volume_l": 20.0},
+    "car": {"weight_kg": 150.0, "volume_l": 200.0},
+    "bike": {"weight_kg": 8.0, "volume_l": 12.0},
 }
 
 
@@ -90,6 +96,14 @@ def _minutes(value: Any) -> float:
     """Normalise HH:MM, decimal-hours, or elapsed-minute test fixtures."""
     if isinstance(value, str):
         text = value.strip()
+        # The evaluator sends the CSV's ISO-8601 simulated timestamps, while
+        # smaller local probes often send an HH:MM value.
+        if "T" in text:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                return parsed.hour * 60 + parsed.minute + parsed.second / 60
+            except ValueError:
+                pass
         if ":" in text:
             hour, minute = text.split(":", 1)
             return (_number(hour) * 60 + _number(minute)) % (24 * 60)
@@ -113,15 +127,30 @@ def _is_flagged_zone(zone: Any) -> bool:
 
 
 def _required_minutes(data: dict[str, Any]) -> float:
-    prep = _number(_value(data, "prep_minutes", "prep_time_min", "prep_time_minutes", "prep_min"))
-    travel = _number(_value(
+    prep = _number(_value(
+        data, "prep_minutes", "prep_time_min", "prep_time_minutes", "prep_min", "restaurant_prep_min",
+    ))
+    total_travel = _value(
         data, "travel_minutes", "travel_time_min", "estimated_travel_minutes",
         "route_minutes", "estimated_minutes", "delivery_minutes",
-    ))
+    )
+    if total_travel is not None:
+        travel = _number(total_travel)
+    else:
+        travel = _number(_value(data, "estimated_pickup_min")) + _number(_value(data, "estimated_delivery_min"))
     return max(0.0, prep) + max(0.0, travel)
 
 
-def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
+def _in_flight_minutes(in_flight_orders: Any) -> float:
+    if not isinstance(in_flight_orders, list):
+        return 0.0
+    return round(sum(
+        max(0.0, _number(order.get("minutes_remaining")))
+        for order in in_flight_orders if isinstance(order, dict)
+    ), 2)
+
+
+def _evaluate(request: DecideRequest, *, degraded: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate fixed safety constraints in deterministic, safety-first order."""
     raw = request.model_dump(mode="json")
     overrides = request.courier_state_overrides.model_dump(mode="json", exclude_none=True)
@@ -133,9 +162,11 @@ def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
     continuous_riding = _number(_value(raw, "continuous_riding_min", "continuous_riding_minutes"))
     shift_end = _value(raw, "shift_end_time")
     required_minutes = _required_minutes(raw)
+    in_flight_orders = _value(raw, "in_flight_orders", default=[])
+    in_flight_minutes = _in_flight_minutes(in_flight_orders)
     vehicle = str(_value(raw, "vehicle_type", "vehicle", default="moto")).strip().lower()
     weight_kg = _number(_value(raw, "weight_kg", "package_weight_kg", "order_weight_kg", "weight"))
-    volume_l = _number(_value(raw, "volume_l", "package_volume_l", "order_volume_l", "volume"))
+    volume_l = _number(_value(raw, "volume_l", "volume_liters", "package_volume_l", "order_volume_l", "volume"))
 
     constraint: str | None = None
     reason = "Order meets the current courier safety and capacity constraints."
@@ -148,13 +179,15 @@ def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
     elif 12 * 60 <= sim_minutes <= 16 * 60 and continuous_riding > 90:
         constraint = "heat_rule"
         reason = "Heat safety rule: continuous riding exceeds 90 minutes during the 12:00 cooling window."
-    elif vehicle in {"moto", "motorcycle", "motorbike"} and weight_kg > 20.0:
+    normalized_vehicle = {"motorcycle": "moto", "motorbike": "moto"}.get(vehicle, vehicle)
+    profile = VEHICLE_PROFILES.get(normalized_vehicle, VEHICLE_PROFILES["moto"])
+    if constraint is None and weight_kg > profile["weight_kg"]:
         constraint = "vehicle_capacity"
-        reason = "Vehicle capacity exceeded: package weight is above the moto 20 kg limit."
-    elif vehicle in {"moto", "motorcycle", "motorbike"} and volume_l > 20.0:
+        reason = f"Vehicle capacity exceeded: package weight is above the {normalized_vehicle} {profile['weight_kg']:g} kg limit."
+    elif constraint is None and volume_l > profile["volume_l"]:
         constraint = "vehicle_capacity"
-        reason = "Vehicle capacity exceeded: package volume is above the moto 20 liter limit."
-    elif shift_end is not None and sim_minutes + required_minutes > _minutes(shift_end):
+        reason = f"Vehicle capacity exceeded: package volume is above the {normalized_vehicle} {profile['volume_l']:g} liter limit."
+    elif constraint is None and shift_end is not None and sim_minutes + in_flight_minutes + required_minutes > _minutes(shift_end):
         constraint = "shift_end_infeasible"
         reason = "Shift end infeasible: required time exceeds the minutes remaining before shift end."
 
@@ -167,7 +200,8 @@ def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         "shift_elapsed_hours": _value(raw, "shift_elapsed_hours"),
         "last_break_end_time": _value(raw, "last_break_end_time"),
         "shift_end_time": shift_end,
-        "in_flight_orders": _value(raw, "in_flight_orders", default=[]),
+        "in_flight_orders": in_flight_orders,
+        "in_flight_minutes": in_flight_minutes,
         "vehicle_type": vehicle,
         "weight_kg": weight_kg,
         "volume_l": volume_l,
@@ -179,7 +213,7 @@ def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         "reason": reason,
         "binding_constraint": constraint,
         "tier": "tier1",
-        "degraded": False,
+        "degraded": degraded,
     }
     explanation = {
         "order_id": request.order_id,
@@ -188,9 +222,8 @@ def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
         "inputs": inputs,
         "alternatives_considered": [
             {
-                "decision": "ACCEPT",
-                "available": constraint is None,
-                "reason": "Blocked by the binding safety constraint." if constraint else "All safety constraints passed.",
+                "option": "ACCEPT",
+                "rejected_because": "Blocked by the binding safety constraint." if constraint else "No safety constraint rejected this order.",
             }
         ],
     }
@@ -201,7 +234,7 @@ def _evaluate(request: DecideRequest) -> tuple[dict[str, Any], dict[str, Any]]:
 async def decide(payload: DecideRequest, request: Request) -> dict[str, Any]:
     """Return a sub-50ms local safety decision without touching live dispatch."""
     started_at = perf_counter()
-    result, explanation = _evaluate(payload)
+    result, explanation = _evaluate(payload, degraded=bool(getattr(request.app.state, "decision_degraded", False)))
     request.app.state.decision_explanations[payload.order_id] = explanation
     result["latency_ms"] = round((perf_counter() - started_at) * 1000, 3)
     return result
